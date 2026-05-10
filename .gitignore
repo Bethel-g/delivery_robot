@@ -1,0 +1,33 @@
+# ROS 2 build artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+.eggs/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Gazebo
+~/.gazebo/
+*.bag
+
+# Map files generated at runtime (keep the placeholder yaml, ignore generated pgm)
+maps/*.pgm
+
+# Logs
+*.log
