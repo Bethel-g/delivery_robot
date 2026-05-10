@@ -1,67 +1,30 @@
 #!/usr/bin/env python3
-"""
-navigation_launch.py — Phase 2: Autonomous Navigation
-======================================================
-Launches:
-  1. Gazebo (office world)
-  2. robot_state_publisher
-  3. spawn_entity
-  4. nav2_bringup (AMCL + planners + costmaps + BT navigator)
-  5. rviz2
-
-Requires a saved map in maps/office_map.yaml (run slam_launch.py first).
-
-Usage:
-  ros2 launch delivery_robot navigation_launch.py
-  ros2 launch delivery_robot navigation_launch.py map:=/path/to/map.yaml
-"""
-
 import os
 from ament_index_python.packages import get_package_share_directory
-
 from launch import LaunchDescription
-from launch.actions import (
-    DeclareLaunchArgument,
-    ExecuteProcess,
-    IncludeLaunchDescription,
-    TimerAction,
-    LogInfo,
-)
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, TimerAction, LogInfo
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
 
-    # ── Package paths ──────────────────────────────────────────────────────
     pkg      = get_package_share_directory('delivery_robot')
     nav2_pkg = get_package_share_directory('nav2_bringup')
 
-    urdf_file    = os.path.join(pkg, 'urdf',   'robot.urdf.xacro')
-    world_file   = os.path.join(pkg, 'worlds', 'office.world')
-    params_file  = os.path.join(pkg, 'config', 'nav2_params.yaml')
-    default_map  = os.path.join(pkg, 'maps',   'office_map.yaml')
-    rviz_config  = os.path.join(pkg, 'rviz',   'navigation.rviz')
+    urdf_file   = os.path.join(pkg, 'urdf',   'robot.urdf.xacro')
+    world_file  = os.path.join(pkg, 'worlds', 'office.world')
+    params_file = os.path.join(pkg, 'config', 'nav2_params.yaml')
+    default_map = os.path.join(pkg, 'maps',   'office_map.yaml')
+    rviz_config = os.path.join(pkg, 'rviz',   'navigation.rviz')
 
-    # ── Arguments ──────────────────────────────────────────────────────────
-    map_arg = DeclareLaunchArgument(
-        'map', default_value=default_map,
-        description='Full path to map yaml file to load')
-
-    use_rviz_arg = DeclareLaunchArgument(
-        'use_rviz', default_value='true',
-        description='Whether to launch RViz2')
-
-    use_sim_time_arg = DeclareLaunchArgument(
-        'use_sim_time', default_value='true',
-        description='Use simulation (Gazebo) clock')
-
-    params_arg = DeclareLaunchArgument(
-        'params_file', default_value=params_file,
-        description='Full path to nav2 params file')
-
+    map_arg          = DeclareLaunchArgument('map',          default_value=default_map)
+    use_rviz_arg     = DeclareLaunchArgument('use_rviz',     default_value='true')
+    use_sim_time_arg = DeclareLaunchArgument('use_sim_time', default_value='true')
+    params_arg       = DeclareLaunchArgument('params_file',  default_value=params_file)
     x_arg = DeclareLaunchArgument('x_pose', default_value='0.5')
     y_arg = DeclareLaunchArgument('y_pose', default_value='2.0')
     z_arg = DeclareLaunchArgument('z_pose', default_value='0.1')
@@ -71,7 +34,6 @@ def generate_launch_description():
     map_yaml     = LaunchConfiguration('map')
     params       = LaunchConfiguration('params_file')
 
-    # ── 1. Gazebo ─────────────────────────────────────────────────────────
     gazebo = ExecuteProcess(
         cmd=[
             'gazebo', '--verbose', world_file,
@@ -81,8 +43,10 @@ def generate_launch_description():
         output='screen',
     )
 
-    # ── 2. Robot State Publisher ──────────────────────────────────────────
-    robot_description = Command(['xacro ', urdf_file])
+    robot_description = ParameterValue(
+        Command(['xacro ', urdf_file]),
+        value_type=str
+    )
 
     robot_state_pub = Node(
         package='robot_state_publisher',
@@ -95,7 +59,6 @@ def generate_launch_description():
         }],
     )
 
-    # ── 3. Spawn robot ────────────────────────────────────────────────────
     spawn_robot = TimerAction(
         period=3.0,
         actions=[
@@ -116,7 +79,6 @@ def generate_launch_description():
         ],
     )
 
-    # ── 4. Nav2 bringup ───────────────────────────────────────────────────
     nav2 = TimerAction(
         period=5.0,
         actions=[
@@ -133,7 +95,6 @@ def generate_launch_description():
         ],
     )
 
-    # ── 5. RViz2 ─────────────────────────────────────────────────────────
     rviz2 = TimerAction(
         period=8.0,
         actions=[
@@ -149,23 +110,18 @@ def generate_launch_description():
         ],
     )
 
-    # ── Status ────────────────────────────────────────────────────────────
     info_start = LogInfo(msg=(
         '\n'
         '╔══════════════════════════════════════════════════════╗\n'
         '║      DELIVERY ROBOT — NAVIGATION MODE                ║\n'
-        '║  Run a mission:                                      ║\n'
-        '║  ros2 run delivery_robot delivery_mission            ║\n'
-        '║              room1 room3 room2                       ║\n'
+        '║  Send mission:                                       ║\n'
+        '║  ros2 run delivery_robot delivery_mission room1 room2║\n'
         '╚══════════════════════════════════════════════════════╝'
     ))
 
     return LaunchDescription([
-        map_arg,
-        use_rviz_arg,
-        use_sim_time_arg,
-        params_arg,
-        x_arg, y_arg, z_arg,
+        map_arg, use_rviz_arg, use_sim_time_arg,
+        params_arg, x_arg, y_arg, z_arg,
         info_start,
         gazebo,
         robot_state_pub,
