@@ -1,4 +1,4 @@
-# 🤖 Autonomous Indoor Delivery Robot
+# 🤖 Autonomous Indoor Delivery Robot (PROJECT BY BETHEL,ESROM AND YANIT AAIT DEPARTMENT OF AI)
 
 [![ROS 2 Humble](https://img.shields.io/badge/ROS%202-Humble-blue?logo=ros)](https://docs.ros.org/en/humble/)
 [![Gazebo Classic](https://img.shields.io/badge/Gazebo-Classic%2011-orange)](https://classic.gazebosim.org/)
@@ -150,7 +150,7 @@ sudo rosdep init && rosdep update
 ```bash
 mkdir -p ~/delivery_ws/src
 cd ~/delivery_ws/src
-git clone https://github.com/YOUR_USERNAME/delivery_robot.git
+git clone https://github.com/Esraprojects/delivery_robot.git
 
 cd ~/delivery_ws
 rosdep install --from-paths src --ignore-src -r -y
