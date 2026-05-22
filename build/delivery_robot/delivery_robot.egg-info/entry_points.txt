@@ -1,6 +1,0 @@
-[console_scripts]
-delivery_mission = delivery_robot.delivery_mission:main
-health_check = delivery_robot.health_check:main
-record_waypoints = delivery_robot.record_waypoints:main
-slam_explorer = delivery_robot.slam_explorer:main
-

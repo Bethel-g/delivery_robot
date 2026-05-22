@@ -1,1 +1,0 @@
-/home/betheln/ros2_ws/src/Robotics/delivery_robot2/delivery_robot/launch/navigation_launch.py
