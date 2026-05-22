@@ -1,0 +1,55 @@
+running develop
+Removing /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages/delivery-robot.egg-link (link to .)
+running egg_info
+writing ../build/delivery_robot/delivery_robot.egg-info/PKG-INFO
+writing dependency_links to ../build/delivery_robot/delivery_robot.egg-info/dependency_links.txt
+writing entry points to ../build/delivery_robot/delivery_robot.egg-info/entry_points.txt
+writing requirements to ../build/delivery_robot/delivery_robot.egg-info/requires.txt
+writing top-level names to ../build/delivery_robot/delivery_robot.egg-info/top_level.txt
+reading manifest file '../build/delivery_robot/delivery_robot.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+writing manifest file '../build/delivery_robot/delivery_robot.egg-info/SOURCES.txt'
+running build
+running build_py
+creating /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build
+creating /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build/lib
+creating /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build/lib/delivery_robot
+copying delivery_robot/slam_explorer.py -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build/lib/delivery_robot
+copying delivery_robot/__init__.py -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build/lib/delivery_robot
+copying delivery_robot/record_waypoints.py -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build/lib/delivery_robot
+copying delivery_robot/delivery_mission.py -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build/lib/delivery_robot
+copying delivery_robot/health_check.py -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build/lib/delivery_robot
+running install
+running install_lib
+creating /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages/delivery_robot
+copying /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build/lib/delivery_robot/slam_explorer.py -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages/delivery_robot
+copying /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build/lib/delivery_robot/__init__.py -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages/delivery_robot
+copying /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build/lib/delivery_robot/record_waypoints.py -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages/delivery_robot
+copying /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build/lib/delivery_robot/delivery_mission.py -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages/delivery_robot
+copying /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build/lib/delivery_robot/health_check.py -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages/delivery_robot
+byte-compiling /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages/delivery_robot/slam_explorer.py to slam_explorer.cpython-310.pyc
+byte-compiling /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages/delivery_robot/__init__.py to __init__.cpython-310.pyc
+byte-compiling /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages/delivery_robot/record_waypoints.py to record_waypoints.cpython-310.pyc
+byte-compiling /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages/delivery_robot/delivery_mission.py to delivery_mission.cpython-310.pyc
+byte-compiling /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages/delivery_robot/health_check.py to health_check.cpython-310.pyc
+running install_data
+copying resource/delivery_robot -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/share/ament_index/resource_index/packages
+copying package.xml -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/share/delivery_robot
+copying launch/navigation_launch.py -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/share/delivery_robot/launch
+copying launch/slam_launch.py -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/share/delivery_robot/launch
+copying urdf/robot.urdf.xacro -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/share/delivery_robot/urdf
+copying worlds/office.world -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/share/delivery_robot/worlds
+copying config/slam_params.yaml -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/share/delivery_robot/config
+copying config/nav2_params.yaml -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/share/delivery_robot/config
+copying maps/office_map.pgm -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/share/delivery_robot/maps
+copying maps/office_map.yaml -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/share/delivery_robot/maps
+copying rviz/slam.rviz -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/share/delivery_robot/rviz
+copying rviz/navigation.rviz -> /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/share/delivery_robot/rviz
+running install_egg_info
+Copying ../build/delivery_robot/delivery_robot.egg-info to /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages/delivery_robot-1.0.0-py3.10.egg-info
+running install_scripts
+Installing delivery_mission script to /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/delivery_robot
+Installing health_check script to /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/delivery_robot
+Installing record_waypoints script to /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/delivery_robot
+Installing slam_explorer script to /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/delivery_robot
+writing list of installed files to '/home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/install.log'

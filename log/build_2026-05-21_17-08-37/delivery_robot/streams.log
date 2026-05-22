@@ -1,0 +1,19 @@
+[0.394s] Invoking command in '/home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot': PYTHONPATH=/home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build --no-deps symlink_data
+[0.554s] running develop
+[0.661s] running egg_info
+[0.661s] writing delivery_robot.egg-info/PKG-INFO
+[0.661s] writing dependency_links to delivery_robot.egg-info/dependency_links.txt
+[0.661s] writing entry points to delivery_robot.egg-info/entry_points.txt
+[0.661s] writing requirements to delivery_robot.egg-info/requires.txt
+[0.661s] writing top-level names to delivery_robot.egg-info/top_level.txt
+[0.662s] reading manifest file 'delivery_robot.egg-info/SOURCES.txt'
+[0.662s] writing manifest file 'delivery_robot.egg-info/SOURCES.txt'
+[0.663s] running build_ext
+[0.663s] Creating /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages/delivery-robot.egg-link (link to .)
+[0.664s] Installing delivery_mission script to /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/delivery_robot
+[0.664s] Installing health_check script to /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/delivery_robot
+[0.664s] Installing record_waypoints script to /home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/delivery_robot
+[0.664s] 
+[0.664s] Installed /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot
+[0.664s] running symlink_data
+[0.682s] Invoked command in '/home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot' returned '0': PYTHONPATH=/home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/betheln/ros2_ws/src/Robotics/delivery_robot2/install/delivery_robot/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/build --no-deps symlink_data
