@@ -1,7 +1,1 @@
-image: office_map.pgm
-mode: trinary
-resolution: 0.05
-origin: [0.105, 0.0752, 0]
-negate: 0
-occupied_thresh: 0.65
-free_thresh: 0.25
+/home/betheln/ros2_ws/src/Robotics/delivery_robot2/build/delivery_robot/maps/office_map.yaml
