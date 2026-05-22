@@ -40,7 +40,7 @@ from std_msgs.msg import String
 DELIVERY_ROOMS: dict[str, tuple[float, float, float]] = {
     #  name       x      y    yaw (degrees)
     "base":   (0.50,  2.00,    0.0),   # charging dock — always return here
-    "room1":  (2.00,  2.00,    0.0),   # bottom-left room
+    "room1":  (2.50,  2.00,    0.0),   # bottom-left room
     "room2":  (7.50,  2.00,  180.0),   # bottom-right room
     "room3":  (2.00,  6.00,    0.0),   # top-left room
     "room4":  (7.50,  6.00,  180.0),   # top-right room
@@ -115,7 +115,7 @@ class DeliveryMission(Node):
     def _feedback_callback(self, feedback_msg) -> None:
         fb = feedback_msg.feedback
         dist = fb.distance_remaining
-        elapsed = fb.navigation_time.nanoseconds / 1e9
+        elapsed = fb.navigation_time.sec + fb.navigation_time.nanosec / 1e9
         # Log at most every 3 seconds (throttled)
         self.get_logger().info(
             f'   📍 pos=({self._current_x:.2f}, {self._current_y:.2f})  '
