@@ -53,6 +53,8 @@ setup(
             'record_waypoints = delivery_robot.record_waypoints:main',
             # System health checker
             'health_check = delivery_robot.health_check:main',
+            # Automated SLAM room explorer
+            'slam_explorer = delivery_robot.slam_explorer:main',
         ],
     },
 )
