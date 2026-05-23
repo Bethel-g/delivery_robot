@@ -104,29 +104,29 @@ controller_server:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.20
 
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
       debug_trajectory_details: true
       min_vel_x: 0.0
       min_vel_y: 0.0
-      max_vel_x: 0.8
+      max_vel_x: 0.65
       max_vel_y: 0.0
-      max_vel_theta: 2.5
+      max_vel_theta: 1.8
       min_speed_xy: 0.0
-      max_speed_xy: 0.8
+      max_speed_xy: 0.65
       min_speed_theta: 0.0
-      acc_lim_x: 5.0
+      acc_lim_x: 2.0
       acc_lim_y: 0.0
-      acc_lim_theta: 3.2
+      acc_lim_theta: 2.0
       decel_lim_x: -2.5
       decel_lim_y: 0.0
       decel_lim_theta: -3.2
       vx_samples: 20
       vy_samples: 5
       vtheta_samples: 20
-      sim_time: 1.7
+      sim_time: 3.0
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 0.2
@@ -142,11 +142,11 @@ controller_server:
         - "PathDist"
         - "GoalDist"
       BaseObstacle.scale: 0.02
-      PathAlign.scale: 32.0
+      PathAlign.scale: 10.0
       PathAlign.forward_point_distance: 0.1
-      GoalAlign.scale: 24.0
+      GoalAlign.scale: 12.0
       GoalAlign.forward_point_distance: 0.1
-      PathDist.scale: 32.0
+      PathDist.scale: 16.0
       GoalDist.scale: 24.0
       RotateToGoal.scale: 32.0
       RotateToGoal.slowing_factor: 5.0
@@ -189,7 +189,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 1.5
-        inflation_radius: 0.15
+        inflation_radius: 0.55
       always_send_full_costmap: true
 
 global_costmap:
@@ -224,7 +224,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 1.5
-        inflation_radius: 0.15
+        inflation_radius: 0.55
       always_send_full_costmap: true
 
 map_server:

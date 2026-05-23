@@ -27,7 +27,7 @@ from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
@@ -41,8 +41,8 @@ DELIVERY_ROOMS: dict[str, tuple[float, float, float]] = {
     #  name       x      y    yaw (degrees)
     "base":   (0.50,  2.00,    0.0),   # charging dock — always return here
     "room1":  (2.50,  2.00,    0.0),   # bottom-left room
-    "room2":  (7.50,  2.00,  180.0),   # bottom-right room
-    "room3":  (2.00,  6.00,    0.0),   # top-left room
+    "room2":  (7.30,  2.00,  180.0),   # bottom-right room
+    "room3":  (2.50,  5.30,    0.0),   # top-left room
     "room4":  (7.50,  6.00,  180.0),   # top-right room
     "corridor_left":  (2.50, 4.00, 90.0),   # left door junction
     "corridor_right": (7.50, 4.00, 90.0),   # right door junction
@@ -86,6 +86,8 @@ class DeliveryMission(Node):
         # ── Publishers ────────────────────────────────────────────────────
         self._status_pub = self.create_publisher(
             String, '/delivery_status', 10)
+        self._vel_pub = self.create_publisher(
+            Twist, '/cmd_vel', 10)
 
         # ── Subscribers ───────────────────────────────────────────────────
         odom_qos = QoSProfile(
@@ -273,8 +275,8 @@ class DeliveryMission(Node):
                     if room != 'base':
                         self.get_logger().info(
                             f'📦  Package delivered at [{room}]. '
-                            f'Pausing 2 s...')
-                        time.sleep(2.0)
+                            f'Initiating drop-off sequence...')
+                        self._perform_dropoff_dance()
 
             if all_ok:
                 self.get_logger().info(
@@ -289,6 +291,24 @@ class DeliveryMission(Node):
             self.get_logger().info(
                 '🔁  Loop mode active. Restarting route in 5 s...')
             time.sleep(5.0)
+
+    def _perform_dropoff_dance(self) -> None:
+        """Perform a 360-degree 'delivery complete' spin."""
+        self.get_logger().info('🔄  Performing 360-degree delivery scan...')
+        msg = Twist()
+        msg.angular.z = 1.0  # rad/s
+        
+        # Spin for ~2*PI seconds
+        duration = 2.0 * math.pi
+        start_time = time.time()
+        while time.time() - start_time < duration:
+            if self._cancelled:
+                break
+            self._vel_pub.publish(msg)
+            time.sleep(0.1)
+            
+        # Stop the robot
+        self._vel_pub.publish(Twist())
 
     # ─── Utilities ────────────────────────────────────────────────────────
 
@@ -368,7 +388,10 @@ def main(args=None):
         node.shutdown()
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass  # already shut down by signal handler
 
 
 if __name__ == '__main__':
