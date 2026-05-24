@@ -36,18 +36,25 @@ class HealthChecker(Node):
         self._received: dict[str, bool] = {t: False for t in REQUIRED_TOPICS}
         self._subs = []
 
-        qos = QoSProfile(
+        qos_volatile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             depth=1,
         )
 
+        qos_transient = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            depth=1,
+        )
+
         for topic, msg_type in REQUIRED_TOPICS.items():
+            profile = qos_transient if topic in ['/map', '/amcl_pose'] else qos_volatile
             self._subs.append(
                 self.create_subscription(
                     msg_type, topic,
                     lambda msg, t=topic: self._recv(t),
-                    qos,
+                    profile,
                 )
             )
 
