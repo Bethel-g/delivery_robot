@@ -1,4 +1,4 @@
-# 🤖 Autonomous Indoor Delivery Robot (PROJECT BY BETHEL,ESROM AND YANIT AAIT DEPARTMENT OF AI)
+# Autonomous Indoor Delivery Robot (PROJECT BY BETHEL, ESROM AND YANIT — AAIT DEPARTMENT OF AI)
 
 [![ROS 2 Humble](https://img.shields.io/badge/ROS%202-Humble-blue?logo=ros)](https://docs.ros.org/en/humble/)
 [![Gazebo Classic](https://img.shields.io/badge/Gazebo-Classic%2011-orange)](https://classic.gazebosim.org/)
@@ -8,59 +8,69 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Build](https://img.shields.io/badge/build-colcon-brightgreen)]()
 
-> A **fully simulated** autonomous indoor delivery robot built with industry-standard tools.  
-> The robot explores an unknown office, builds its own map in real time, then accepts delivery commands and navigates autonomously — no hardware required.
+> A **fully simulated** autonomous indoor delivery robot built with industry-standard tools.
+> The robot explores an unknown office, builds its own map in real time, then accepts delivery
+> commands and navigates autonomously — no hardware required.
+> Compares two navigation algorithms: **DWA** and **MPPI**.
 
 ---
 
-## 🎬 Demo
+## Demo
 
 > *Record your own demo: `kazam` or `peek` for screen capture → convert to GIF → save as `docs/demo.gif`*
 
 ```
 Phase 1 — SLAM:        Robot drives around office, building occupancy grid map
-Phase 2 — Navigation:  "room1 room3 room2" → robot delivers to each room and returns to base
+Phase 2 — Navigation:  "room1 room3 room2" → robot picks up package, delivers to each room, returns to base
 ```
 
 ---
 
-## ✨ Features
+## Features
 
 | Feature | Details |
 |---|---|
 | **Custom Robot Model** | Differential-drive robot (URDF/Xacro) with 360° 2D LIDAR, IMU, caster wheel, and realistic inertia tensors |
-| **Realistic Indoor World** | 10×8 m multi-room Gazebo office: 4 rooms, corridor, doors, desks, filing cabinets, a dynamic obstacle |
+| **Realistic Indoor World** | 10×8 m multi-room Gazebo office: 4 rooms, corridor, doors, desks, filing cabinets, two dynamic obstacles |
 | **Real-Time SLAM** | `slam_toolbox` online-async mapping — robot builds occupancy grid without any prior map |
-| **Full Nav2 Stack** | AMCL localisation · A* global planner · DWB local planner · costmaps · behaviour-tree navigator |
-| **Delivery Mission Node** | CLI-driven Python action client: multi-stop routes, live feedback, fault recovery, optional loop mode |
+| **Dual Algorithm Comparison** | Algorithm 1: NavFn A\* + DWB — Algorithm 2: Smac Hybrid A\* + MPPI — selectable at launch |
+| **Full Nav2 Stack** | AMCL localisation · global planner · local controller · costmaps · behaviour-tree navigator |
+| **Delivery Mission Node** | State machine: IDLE→PICKUP→LOADED→NAVIGATING→DELIVERING→RETURNING with green RViz payload marker |
+| **Dynamic Obstacles** | Two moving boxes (orange circular, blue linear) controlled via `/gazebo/set_entity_state` |
+| **Metrics Logger** | Records duration, path length, average speed, and recovery count to `~/delivery_metrics.csv` |
 | **Waypoint Recorder** | Interactive tool to record room coordinates from actual robot poses after mapping |
 | **Health Checker** | Pre-flight node that verifies all required topics and the Nav2 action server are live |
-| **One-Command Launch** | Single `ros2 launch` for both SLAM and navigation modes |
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     User / Terminal                             │
-│   ros2 run delivery_robot delivery_mission room1 room3 room2   │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ NavigateToPose action
-                             ▼
-┌────────────────────────────────────────────────────────────────┐
-│                        Nav2 Stack                              │
-│   BT Navigator → Global Planner (A*) → Local Planner (DWB)   │
-│   ↕ costmaps          ↕ /plan              ↕ /cmd_vel         │
-│   AMCL Localiser ←── /scan (LIDAR)                            │
-└────────────────────────────┬───────────────────────────────────┘
-                             │ /cmd_vel, /odom, /scan, TF
-                             ▼
-┌────────────────────────────────────────────────────────────────┐
-│                     Gazebo Simulation                          │
-│   URDF Robot ← diff_drive plugin ← libgazebo_ros_init         │
-│   LIDAR plugin → /scan           IMU plugin → /imu            │
-└────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                        User / Terminal                               │
+│   ros2 run delivery_robot delivery_mission room1 room3 room2        │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ NavigateToPose action
+                               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                          Nav2 Stack                                   │
+│                                                                       │
+│  algorithm:=dwa  → NavFn A* global planner  + DWB local controller  │
+│  algorithm:=mppi → Smac Hybrid A* planner   + MPPI local controller │
+│                                                                       │
+│  BT Navigator → Global Planner → Local Controller → /cmd_vel        │
+│  ↕ costmaps         ↕ /plan          ↕ velocity_smoother            │
+│  AMCL Localiser ←── /scan (LIDAR)    collision_monitor              │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │ /cmd_vel, /odom, /scan, TF
+                               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                       Gazebo Simulation                               │
+│  URDF Robot ← diff_drive plugin ← libgazebo_ros_state               │
+│  LIDAR plugin → /scan           IMU plugin → /imu                   │
+│  dynamic_box (orange, circular) + dynamic_box2 (blue, linear)       │
+│  delivery_item (green package) — hidden on pickup, placed on drop   │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ### ROS 2 Topic Map
@@ -74,57 +84,60 @@ Phase 2 — Navigation:  "room1 room3 room2" → robot delivers to each room and
 | `/amcl_pose` | `geometry_msgs/PoseWithCovarianceStamped` | AMCL → Nav2 | Localised robot pose |
 | `/plan` | `nav_msgs/Path` | Nav2 → RViz | Global planned path |
 | `/delivery_status` | `std_msgs/String` | Mission → Any | Mission event log |
+| `/payload_marker` | `visualization_msgs/Marker` | Mission → RViz | Green box on robot when loaded |
 
 ---
 
-## 📁 Package Structure
+## Package Structure
 
 ```
 delivery_robot/
 ├── delivery_robot/              # Python nodes
 │   ├── __init__.py
-│   ├── delivery_mission.py      # 🚀 Main mission node (NavigateToPose action client)
-│   ├── record_waypoints.py      # 📍 Interactive waypoint recorder
-│   └── health_check.py          # 🔍 Pre-flight system check
+│   ├── delivery_mission.py      # Main mission node — state machine + NavigateToPose client
+│   ├── dynamic_obstacles.py     # Moves two obstacle boxes in Gazebo world
+│   ├── metrics_logger.py        # Records performance CSV per mission
+│   ├── record_waypoints.py      # Interactive waypoint recorder
+│   └── health_check.py          # Pre-flight system check
 │
 ├── urdf/
-│   └── robot.urdf.xacro         # 🦾 Robot model: chassis, wheels, LIDAR, IMU
+│   └── robot.urdf.xacro         # Robot model: chassis, wheels, LIDAR, IMU
 │
 ├── worlds/
-│   └── office.world             # 🏢 4-room office (SDF format)
+│   └── office.world             # 4-room office with dynamic obstacles and delivery_item
 │
 ├── maps/
-│   ├── office_map.pgm           # 🗺️  Saved occupancy grid (generated by SLAM)
-│   └── office_map.yaml          # 📄 Map metadata (resolution, origin, thresholds)
+│   └── office_map.yaml          # Map metadata (office_map.pgm is generated by SLAM, not tracked)
 │
 ├── config/
-│   ├── nav2_params.yaml         # ⚙️  Full Nav2 configuration (AMCL, planners, costmaps)
-│   └── slam_params.yaml         # ⚙️  slam_toolbox configuration
+│   ├── nav2_params_dwa.yaml     # Algorithm 1: NavFn A* + DWB
+│   ├── nav2_params_mppi.yaml    # Algorithm 2: Smac Hybrid A* + MPPI
+│   └── slam_params.yaml         # slam_toolbox configuration
 │
 ├── launch/
 │   ├── slam_launch.py           # Phase 1: Gazebo + robot + SLAM + RViz
-│   └── navigation_launch.py     # Phase 2: Gazebo + robot + Nav2 + RViz
+│   └── navigation_launch.py     # Phase 2: Gazebo + robot + Nav2 + dynamic obstacles + RViz
 │
 ├── rviz/
-│   ├── slam.rviz                # RViz config for SLAM (map + scan + TF)
-│   └── navigation.rviz          # RViz config for Nav (costmaps + path + particles)
+│   ├── slam.rviz                # RViz config for SLAM
+│   └── navigation.rviz          # RViz config for navigation
 │
 ├── test/
 │   └── test_delivery_mission.py # Unit tests (pytest)
 │
-├── package.xml                  # ROS 2 package manifest
-├── setup.py                     # Python package setup
+├── package.xml
+├── setup.py
 └── README.md
 ```
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
-- **Ubuntu 22.04 LTS** (bare metal, VM, or WSL2 with GUI support)
-- **ROS 2 Humble** installed (see [official instructions](https://docs.ros.org/en/humble/Installation.html))
+- **Ubuntu 22.04 LTS**
+- **ROS 2 Humble** installed ([official instructions](https://docs.ros.org/en/humble/Installation.html))
 - **~4 GB free disk space** for ROS 2 + Gazebo
 
 ### 1. Install dependencies
@@ -156,7 +169,6 @@ cd ~/delivery_ws
 rosdep install --from-paths src --ignore-src -r -y
 colcon build --symlink-install
 
-# Source the workspace (add to ~/.bashrc to make permanent)
 source /opt/ros/humble/setup.bash
 source ~/delivery_ws/install/setup.bash
 ```
@@ -180,40 +192,44 @@ Watch the occupancy grid grow in RViz2 as you drive through each room and corrid
 ### 4. Phase 2 — Autonomous delivery
 
 ```bash
-# Terminal 1: Launch navigation stack (loads saved map)
-ros2 launch delivery_robot navigation_launch.py
+# Terminal 1: Launch navigation stack — choose your algorithm
+ros2 launch delivery_robot navigation_launch.py algorithm:=dwa
+# or
+ros2 launch delivery_robot navigation_launch.py algorithm:=mppi
 
-# Terminal 2: Check all systems are ready
-ros2 run delivery_robot health_check
+# Wait ~15 seconds for Gazebo, Nav2, dynamic obstacles, and RViz2 to fully start
 
-# Terminal 3: Dispatch a delivery mission
+# Terminal 2: Run the delivery mission
 ros2 run delivery_robot delivery_mission room1 room3 room2
 
-# The robot will navigate: base → room1 → room3 → room2 → base
-# Watch the planned path and particle cloud in RViz2
+# Terminal 3 (optional): Watch live mission events
+ros2 topic echo /delivery_status
 ```
 
-### 5. Record your own waypoints (optional)
+The robot will: load the package at base → navigate to each room → deliver → return to base.
+A green box appears in RViz2 while the robot is carrying the package.
 
-After saving your SLAM map, you can record precise delivery coordinates:
+### 5. View performance metrics
 
 ```bash
-# With navigation_launch.py running:
-ros2 run delivery_robot record_waypoints
-# Drive to each room, press Enter, give it a name, type "done"
-# Copy the output into delivery_mission.py → DELIVERY_ROOMS
+cat ~/delivery_metrics.csv
 ```
+
+Run once with `algorithm:=dwa` and once with `algorithm:=mppi` to compare results.
 
 ---
 
-## 🎮 Mission Node Reference
+## Mission Node Reference
 
 ```bash
-# Basic delivery route
+# Basic delivery route (returns to base automatically)
 ros2 run delivery_robot delivery_mission room1 room2
 
-# Multi-stop route (returns to base automatically)
+# Multi-stop route
 ros2 run delivery_robot delivery_mission room1 room3 room4 room2
+
+# Run with MPPI algorithm label (for metrics correlation)
+ros2 run delivery_robot delivery_mission --algorithm mppi room1 room2
 
 # Loop mode — repeat indefinitely (Ctrl-C to stop)
 ros2 run delivery_robot delivery_mission --loop room1 room2
@@ -221,20 +237,19 @@ ros2 run delivery_robot delivery_mission --loop room1 room2
 # Skip return-to-base
 ros2 run delivery_robot delivery_mission --no-return room1
 
-# List all known rooms
+# List all known rooms and coordinates
 ros2 run delivery_robot delivery_mission --list
-
-# Monitor mission status live
-ros2 topic echo /delivery_status
 ```
+
+Available rooms: `base`, `room1`, `room2`, `room3`, `room4`, `corridor_left`, `corridor_right`
 
 ---
 
-## 🧠 Core Concepts Explained
+## Core Concepts
 
 ### SLAM — Simultaneous Localisation and Mapping
 
-The robot starts in an **unknown environment** with no prior map. `slam_toolbox` solves the chicken-and-egg problem — it simultaneously estimates the robot's pose *and* builds the map by:
+The robot starts in an unknown environment with no prior map. `slam_toolbox` simultaneously estimates the robot's pose and builds the map by:
 
 1. Matching new LIDAR scans to previously seen geometry (scan matching)
 2. Detecting when the robot revisits a location (loop closure)
@@ -250,8 +265,8 @@ The robot starts in an **unknown environment** with no prior map. `slam_toolbox`
 | **AMCL** | Particle filter: localises the robot within the saved map using live LIDAR |
 | **Global Costmap** | Inflated static map — plans around known walls with a safety margin |
 | **Local Costmap** | Rolling window around the robot — avoids dynamic obstacles in real time |
-| **NavFn (A\*)** | Finds globally optimal collision-free path from current pose to goal |
-| **DWB** | Converts the global path to safe velocity commands, re-planning around obstacles |
+| **NavFn A\* / Smac Hybrid A\*** | Finds globally optimal collision-free path (DWA mode / MPPI mode) |
+| **DWB / MPPI** | Converts the global path to safe velocity commands (DWA mode / MPPI mode) |
 | **BT Navigator** | Orchestrates the above via a Behaviour Tree — handles retries and recovery |
 
 ### TF2 Transform Tree
@@ -270,46 +285,21 @@ map
 
 ---
 
-## 👥 Team Roles & Contribution Guide
-
-| Role | Responsibility | Key Files |
-|---|---|---|
-| **Robot Designer** | URDF model, sensor parameters, Gazebo physics tuning | `urdf/robot.urdf.xacro` |
-| **Navigation Lead** | SLAM config, Nav2 parameter tuning, RViz config | `config/nav2_params.yaml`, `config/slam_params.yaml` |
-| **Mission Developer** | Delivery node, waypoint recorder, health checker | `delivery_robot/*.py` |
-| **Integration Lead** | Launch files, Git workflow, CI, demo video, documentation | `launch/*.py`, `README.md` |
-
-### Git Workflow
-
-```bash
-# Feature branch per role
-git checkout -b feat/urdf-robot-model
-git checkout -b feat/nav2-tuning
-git checkout -b feat/delivery-mission
-git checkout -b feat/launch-integration
-
-# Conventional commits
-git commit -m "feat(urdf): add IMU sensor link and plugin"
-git commit -m "fix(nav2): reduce inflation radius to prevent narrow-door blocking"
-git commit -m "docs: update waypoint coordinates after SLAM"
-```
-
----
-
-## 🔧 Troubleshooting
+## Troubleshooting
 
 | Problem | Likely Cause | Fix |
 |---|---|---|
 | Robot not moving | `/cmd_vel` not reaching Gazebo | Check `ros2 topic echo /cmd_vel` and diff_drive plugin name |
-| Map not building | LIDAR topic mismatch | Verify `scan_topic: /scan` in `slam_params.yaml` and plugin remapping |
+| Map not building | LIDAR topic mismatch | Verify `scan_topic: /scan` in `slam_params.yaml` |
 | AMCL not converging | Wrong initial pose | Use RViz2 "2D Pose Estimate" tool to set initial pose manually |
 | Nav2 goal rejected | Costmap inflation blocking goal | Increase `xy_goal_tolerance` or move waypoint away from walls |
-| Robot oscillates | DWB critic weights | Reduce `PathAlign.scale` or increase `sim_time` |
+| Robot oscillates | Controller tuning | Reduce `PathAlign.scale` (DWB) or adjust `vx_max` (MPPI) |
+| Dynamic obstacles not moving | Gazebo state service not ready | Wait the full 15 s startup delay; check `/gazebo/set_entity_state` |
 | Gazebo crashes | GPU memory (WSL2) | Set `LIBGL_ALWAYS_SOFTWARE=1 gazebo ...` for software rendering |
 
 ---
 
-## 🧪 Running Tests
+## Running Tests
 
 ```bash
 cd ~/delivery_ws
@@ -323,18 +313,18 @@ python3 -m pytest test/ -v
 
 ---
 
-## 🔭 Extensions & Future Work
+## Team Roles
 
-- **Voice control** — integrate `speech_recognition` to accept spoken room names
-- **Web dashboard** — Flask + ROS 2 bridge for browser-based mission dispatch  
-- **Multi-robot fleet** — namespace multiple robots and coordinate via a fleet manager
-- **3D LIDAR** — swap 2D LIDAR for a Velodyne VLP-16 and use `rtabmap` for 3D SLAM
-- **Real hardware** — the package can be migrated to a physical TurtleBot 3 or custom chassis with minimal changes
-- **CI/CD** — add GitHub Actions to build and run unit tests on every push
+| Member | Role | Key Files |
+|---|---|---|
+| **Robot Designer** | URDF model, sensor parameters, Gazebo physics tuning | `urdf/robot.urdf.xacro`, `worlds/office.world` |
+| **Navigation Lead** | SLAM config, Nav2 parameter tuning, algorithm comparison | `config/nav2_params_dwa.yaml`, `config/nav2_params_mppi.yaml` |
+| **Mission Developer** | Delivery node, dynamic obstacles, metrics logger | `delivery_robot/*.py` |
+| **Integration Lead** | Launch files, Git workflow, demo, documentation | `launch/*.py`, `README.md` |
 
 ---
 
-## 📚 References
+## References
 
 - [ROS 2 Humble Documentation](https://docs.ros.org/en/humble/)
 - [Nav2 Documentation](https://navigation.ros.org/)
@@ -342,14 +332,11 @@ python3 -m pytest test/ -v
 - [Gazebo Classic Tutorials](https://classic.gazebosim.org/tutorials)
 - [URDF Tutorials](https://docs.ros.org/en/humble/Tutorials/Intermediate/URDF/URDF-Main.html)
 - [DWB Local Planner](https://navigation.ros.org/configuration/packages/configuring-dwb-controller.html)
+- [MPPI Controller](https://navigation.ros.org/configuration/packages/configuring-mppic.html)
 - [AMCL Configuration](https://navigation.ros.org/configuration/packages/configuring-amcl.html)
 
 ---
 
-## 📄 License
+## License
 
 MIT License — see [LICENSE](LICENSE) for details.
-
----
-
-*Built with ❤️ using ROS 2 Humble · Gazebo Classic · Nav2 · slam_toolbox*
