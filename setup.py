@@ -47,14 +47,12 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            # Primary delivery mission node
-            'delivery_mission = delivery_robot.delivery_mission:main',
-            # Waypoint recorder utility
-            'record_waypoints = delivery_robot.record_waypoints:main',
-            # System health checker
-            'health_check = delivery_robot.health_check:main',
-            # Automated SLAM room explorer
-            'slam_explorer = delivery_robot.slam_explorer:main',
+            'delivery_mission   = delivery_robot.delivery_mission:main',
+            'record_waypoints   = delivery_robot.record_waypoints:main',
+            'health_check       = delivery_robot.health_check:main',
+            'slam_explorer      = delivery_robot.slam_explorer:main',
+            'dynamic_obstacles  = delivery_robot.dynamic_obstacles:main',
+            'metrics_logger     = delivery_robot.metrics_logger:main',
         ],
     },
 )

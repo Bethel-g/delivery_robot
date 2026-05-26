@@ -904,6 +904,79 @@
         <kinematic>0</kinematic>
       </link>
     </model>
+    <!-- Dynamic obstacle 2: linear back-and-forth in horizontal corridor -->
+    <model name='dynamic_box2'>
+      <static>0</static>
+      <pose>3.5 4.0 0.2 0 0 0</pose>
+      <link name='link'>
+        <collision name='col'>
+          <geometry>
+            <box><size>0.4 0.4 0.4</size></box>
+          </geometry>
+          <surface>
+            <friction><ode><mu>0.6</mu><mu2>0.6</mu2></ode></friction>
+            <contact><ode/></contact>
+            <bounce/>
+          </surface>
+          <max_contacts>10</max_contacts>
+        </collision>
+        <visual name='vis'>
+          <geometry>
+            <box><size>0.4 0.4 0.4</size></box>
+          </geometry>
+          <material>
+            <ambient>0.1 0.4 1.0 1</ambient>
+            <diffuse>0.1 0.4 1.0 1</diffuse>
+          </material>
+        </visual>
+        <inertial>
+          <mass>2</mass>
+          <inertia>
+            <ixx>0.027</ixx><iyy>0.027</iyy><izz>0.027</izz>
+            <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+          </inertia>
+        </inertial>
+        <kinematic>1</kinematic>
+      </link>
+    </model>
+
+    <!-- Delivery item: package at base station waiting for pickup -->
+    <model name='delivery_item'>
+      <static>0</static>
+      <pose>0.8 2.3 0.15 0 0 0</pose>
+      <link name='link'>
+        <collision name='col'>
+          <geometry>
+            <box><size>0.25 0.25 0.25</size></box>
+          </geometry>
+          <surface>
+            <friction><ode><mu>0.6</mu><mu2>0.6</mu2></ode></friction>
+            <contact><ode/></contact>
+            <bounce/>
+          </surface>
+          <max_contacts>10</max_contacts>
+        </collision>
+        <visual name='vis'>
+          <geometry>
+            <box><size>0.25 0.25 0.25</size></box>
+          </geometry>
+          <material>
+            <ambient>0.1 0.85 0.1 1</ambient>
+            <diffuse>0.1 0.85 0.1 1</diffuse>
+            <emissive>0.0 0.2 0.0 1</emissive>
+          </material>
+        </visual>
+        <inertial>
+          <mass>0.5</mass>
+          <inertia>
+            <ixx>0.003</ixx><iyy>0.003</iyy><izz>0.003</izz>
+            <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+          </inertia>
+        </inertial>
+        <kinematic>1</kinematic>
+      </link>
+    </model>
+
     <gravity>0 0 -9.8</gravity>
     <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
     <atmosphere type='adiabatic'/>
@@ -1887,6 +1960,12 @@
         <pose>0 0 10 0 -0 0</pose>
       </light>
     </state>
+    <!-- ROS 2 state service: enables /gazebo/set_entity_state for dynamic obstacles -->
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+      <ros><namespace>/gazebo</namespace></ros>
+      <update_rate>10.0</update_rate>
+    </plugin>
+
     <gui fullscreen='0'>
       <camera name='user_camera'>
         <pose>24.9142 -9.06742 14.5589 0 0.275643 2.35619</pose>
