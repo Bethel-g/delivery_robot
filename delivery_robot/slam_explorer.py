@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-slam_explorer.py — Autonomous SLAM Coverage Driver
-===================================================
-Drives the robot through all rooms in a systematic pattern so
-slam_toolbox builds a complete, clean map.
+slam_explorer.py — Autonomous SLAM Coverage Driver (LIDAR Wall Follower)
+=========================================================================
+Uses live /scan data to follow the right-hand wall, naturally exploring
+all accessible rooms without hitting walls.
 
-Route (~4 minutes):
-  Base → Room1 → Room2 → (north) Room4 → (west) Room3 → base
+Right-hand rule guarantees full coverage: the robot hugs the right wall,
+turns right whenever a gap appears, and turns left whenever blocked.
 
 Usage (after slam_launch.py is running):
   ros2 run delivery_robot slam_explorer
@@ -19,7 +19,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
 
 
 def _vel(linear=0.0, angular=0.0):
@@ -31,9 +31,13 @@ def _vel(linear=0.0, angular=0.0):
 
 STOP = _vel()
 
-LINEAR_SPEED  = 0.22   # m/s
-ANGULAR_SPEED = 0.70   # rad/s for directional turns
-SPIN_SPEED    = 0.90   # rad/s for 360 scans (faster)
+# ── Tuning ────────────────────────────────────────────────────────────────────
+FORWARD_SPEED    = 0.18   # m/s — slow for clean LIDAR sweeps
+TURN_SPEED       = 0.55   # rad/s
+TARGET_WALL_DIST = 0.55   # desired distance from right wall (m)
+FRONT_WARN_DIST  = 0.65   # slow/turn when this close ahead
+FRONT_STOP_DIST  = 0.45   # hard stop/turn threshold
+EXPLORE_SECONDS  = 260    # total mapping time (~4.5 min)
 
 
 class SlamExplorer(Node):
@@ -42,176 +46,126 @@ class SlamExplorer(Node):
         super().__init__('slam_explorer')
         self._pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
-        odom_qos = QoSProfile(
+        scan_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             depth=5,
         )
-        self._odom_sub = self.create_subscription(
-            Odometry, '/odom', self._odom_cb, odom_qos)
+        self._scan_sub = self.create_subscription(
+            LaserScan, '/scan', self._scan_cb, scan_qos)
+        self._scan = None
 
-        self._x = 0.0
-        self._y = 0.0
-        self._odom_ready = False
-
-    def _odom_cb(self, msg):
-        self._x = msg.pose.pose.position.x
-        self._y = msg.pose.pose.position.y
-        self._odom_ready = True
+    def _scan_cb(self, msg: LaserScan):
+        self._scan = msg
 
     def _tick(self):
         rclpy.spin_once(self, timeout_sec=0.05)
 
-    # ── Primitives ────────────────────────────────────────────────────────────
+    # ── LIDAR helpers ─────────────────────────────────────────────────────────
 
-    def drive(self, metres):
-        """Drive forward using odometry distance feedback."""
-        while not self._odom_ready:
-            self._tick()
-
-        start_x, start_y = self._x, self._y
-        target = abs(metres)
-        sign = 1.0 if metres >= 0 else -1.0
-
-        while True:
-            self._tick()
-            if math.hypot(self._x - start_x, self._y - start_y) >= target:
-                break
-            self._pub.publish(_vel(sign * LINEAR_SPEED, 0.0))
-
-        self._pub.publish(STOP)
-        time.sleep(0.2)
-
-    def turn(self, degrees):
+    def _sector(self, scan: LaserScan, idx_start: int, idx_end: int) -> float:
         """
-        Time-based turn — avoids the yaw-wrapping bug for large angles.
-        Works reliably for any angle in both directions.
+        Return the minimum valid range in a sector of the scan array.
+        Indices wrap around (modulo len).
+
+        LIDAR layout for this robot (360 samples, angle_min=-pi):
+          index   0 = -180 deg (directly behind)
+          index  90 = -90  deg (right)
+          index 180 =   0  deg (forward)
+          index 270 = +90  deg (left)
         """
-        radians  = abs(math.radians(degrees))
-        duration = radians / ANGULAR_SPEED
-        sign     = 1.0 if degrees >= 0 else -1.0
-        end      = time.time() + duration
-        while time.time() < end:
-            self._pub.publish(_vel(0.0, sign * ANGULAR_SPEED))
-            time.sleep(0.05)
-        self._pub.publish(STOP)
-        time.sleep(0.2)
+        n = len(scan.ranges)
+        vals = []
+        for i in range(idx_start, idx_end):
+            r = scan.ranges[i % n]
+            if math.isfinite(r) and r > 0.12:
+                vals.append(r)
+        return min(vals) if vals else float('inf')
 
-    def spin_360(self):
-        """Full 360 deg spin — time-based at SPIN_SPEED."""
-        self.get_logger().info('    → 360° scan')
-        duration = (2 * math.pi) / SPIN_SPEED   # ~7 s
-        end = time.time() + duration
-        while time.time() < end:
-            self._pub.publish(_vel(0.0, SPIN_SPEED))
-            time.sleep(0.05)
-        self._pub.publish(STOP)
-        time.sleep(0.4)
+    # ── Wall-follower logic ───────────────────────────────────────────────────
 
-    def pause(self, seconds=0.5):
-        end = time.time() + seconds
-        while time.time() < end:
-            self._pub.publish(STOP)
-            self._tick()
-
-    def room_sweep(self, depth=1.2, width=0.9):
+    def _compute_cmd(self, scan: LaserScan) -> Twist:
         """
-        Drive a rectangle around the inside of a room.
-        Restores original heading on exit.
+        Right-hand wall follower with four rules (priority order):
+          1. Front blocked        → turn left in place
+          2. Front-right corner   → gentle left steer
+          3. Right gap / opening  → turn right into new room
+          4. Normal wall tracking → proportional correction
         """
-        self.drive(depth)
-        self.turn(90)
-        self.drive(width)
-        self.turn(90)
-        self.drive(depth)
-        self.turn(90)
-        self.drive(width)
-        self.turn(90)
+        front        = self._sector(scan, 168, 193)   # ±12° forward
+        front_right  = self._sector(scan, 128, 168)   # 12–52° right of forward
+        right        = self._sector(scan,  78, 103)   # ±12° right
+        front_left   = self._sector(scan, 193, 233)   # 12–52° left of forward
 
-    # ── Exploration route ─────────────────────────────────────────────────────
+        # Rule 1 — obstacle directly ahead
+        if front < FRONT_WARN_DIST:
+            speed  = 0.0 if front < FRONT_STOP_DIST else FORWARD_SPEED * 0.3
+            # Bias turn direction toward the more open side
+            turn   = TURN_SPEED * (1.2 if front_left >= front_right else 0.8)
+            return _vel(speed, turn)
+
+        # Rule 2 — wall closing in from front-right (approaching corner)
+        if front_right < TARGET_WALL_DIST - 0.05:
+            return _vel(FORWARD_SPEED * 0.6, TURN_SPEED * 0.5)
+
+        # Rule 3 — opening on the right (doorway or new room)
+        if right > TARGET_WALL_DIST + 0.35:
+            return _vel(FORWARD_SPEED * 0.8, -TURN_SPEED * 0.7)
+
+        # Rule 4 — track the right wall with a proportional controller
+        error   = right - TARGET_WALL_DIST          # positive = too far
+        angular = -0.9 * error                      # turn right if too far
+        angular = max(-TURN_SPEED, min(TURN_SPEED, angular))
+        return _vel(FORWARD_SPEED, angular)
+
+    # ── Main loop ─────────────────────────────────────────────────────────────
 
     def explore(self):
-        self.get_logger().info('Waiting for odometry...')
-        while not self._odom_ready:
+        self.get_logger().info('Waiting for LIDAR...')
+        while self._scan is None:
             self._tick()
             time.sleep(0.05)
 
         time.sleep(3.0)   # let slam_toolbox initialise
 
-        self.get_logger().info('╔══════════════════════════════╗')
-        self.get_logger().info('║  SLAM Explorer — 8 phases    ║')
-        self.get_logger().info('║  ~4 minutes total            ║')
-        self.get_logger().info('╚══════════════════════════════╝')
+        self.get_logger().info('╔══════════════════════════════════════════╗')
+        self.get_logger().info('║  SLAM Explorer — LIDAR wall follower     ║')
+        self.get_logger().info(f'║  Mapping for {EXPLORE_SECONDS} s — watch RViz2 map  ║')
+        self.get_logger().info('╚══════════════════════════════════════════╝')
 
-        # 1. Base
-        self.get_logger().info('[1/8] Base — initial scan')
-        self.spin_360()
-        self.pause(0.5)
+        start = time.time()
+        last_log = 0
 
-        # 2. Room 1
-        self.get_logger().info('[2/8] Driving east to Room 1')
-        self.drive(1.8)
-        self.spin_360()
-        self.room_sweep(1.1, 0.9)
-        self.pause(0.4)
+        while True:
+            self._tick()
+            elapsed = time.time() - start
 
-        # 3. Room 2
-        self.get_logger().info('[3/8] East corridor to Room 2')
-        self.drive(4.6)
-        self.spin_360()
-        self.room_sweep(1.1, 0.9)
-        self.pause(0.4)
+            if elapsed >= EXPLORE_SECONDS:
+                break
 
-        # 4. Turn north — Room 4
-        self.get_logger().info('[4/8] Turn north — driving to Room 4')
-        self.turn(90)
-        self.drive(2.0)
-        self.spin_360()          # corridor midpoint
-        self.drive(2.0)
-        self.spin_360()
-        self.room_sweep(1.1, 0.9)
-        self.pause(0.4)
+            # Progress log every 30 s
+            if int(elapsed) // 30 > last_log:
+                last_log = int(elapsed) // 30
+                remaining = EXPLORE_SECONDS - elapsed
+                self.get_logger().info(
+                    f'  Mapping... {elapsed:.0f}s elapsed, {remaining:.0f}s remaining')
 
-        # 5. Drive west — Room 3
-        self.get_logger().info('[5/8] Drive west to Room 3')
-        self.turn(90)
-        self.drive(2.5)
-        self.spin_360()          # top corridor midpoint
-        self.drive(2.5)
-        self.spin_360()
-        self.room_sweep(1.1, 0.9)
-        self.pause(0.4)
+            if self._scan is not None:
+                cmd = self._compute_cmd(self._scan)
+                self._pub.publish(cmd)
 
-        # 6. Head south — left corridor
-        self.get_logger().info('[6/8] Head south — left corridor')
-        self.turn(-90)
-        self.drive(1.8)
-        self.spin_360()
-        self.drive(1.8)
-        self.pause(0.4)
+            time.sleep(0.05)
 
-        # 7. Loop-closure pass: full corridor east then west
-        self.get_logger().info('[7/8] Loop-closure: corridor east then west')
-        self.turn(-90)
-        self.drive(4.6)
-        self.turn(180)
-        self.drive(4.6)
-        self.pause(0.4)
+        self._pub.publish(STOP)
 
-        # 8. Return to base
-        self.get_logger().info('[8/8] Returning to base — final scan')
-        self.turn(90)
-        self.drive(1.8)
-        self.turn(180)
-        self.spin_360()
-        self.pause(1.0)
-
-        self.get_logger().info('=== Exploration complete! Now save the map: ===')
-        self.get_logger().info(
-            'ros2 run nav2_map_server map_saver_cli '
-            '-f ~/delivery_ws/src/delivery_robot/maps/office_map '
-            '--ros-args -p save_map_timeout:=10.0'
-        )
+        self.get_logger().info('╔══════════════════════════════════════════╗')
+        self.get_logger().info('║  Exploration complete! Save the map now: ║')
+        self.get_logger().info('║                                          ║')
+        self.get_logger().info('║  ros2 run nav2_map_server map_saver_cli \\║')
+        self.get_logger().info('║    -f ~/delivery_ws/src/delivery_robot/  ║')
+        self.get_logger().info('║         maps/office_map                  ║')
+        self.get_logger().info('║    --ros-args -p save_map_timeout:=10.0  ║')
+        self.get_logger().info('╚══════════════════════════════════════════╝')
 
 
 def main(args=None):
@@ -220,7 +174,7 @@ def main(args=None):
     try:
         node.explore()
     except KeyboardInterrupt:
-        node.get_logger().info('Interrupted.')
+        node.get_logger().info('Interrupted by user.')
     finally:
         node._pub.publish(STOP)
         node.destroy_node()
