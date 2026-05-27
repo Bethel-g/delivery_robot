@@ -3,10 +3,12 @@
 slam_explorer.py — Autonomous SLAM Coverage Driver (LIDAR Wall Follower)
 =========================================================================
 Uses live /scan data to follow the right-hand wall, naturally exploring
-all accessible rooms without hitting walls.
+all accessible rooms without hitting walls or getting stuck on obstacles.
 
-Right-hand rule guarantees full coverage: the robot hugs the right wall,
-turns right whenever a gap appears, and turns left whenever blocked.
+Obstacle handling:
+  - Reactive: LIDAR-based wall follower avoids static and moving obstacles
+  - Stuck detection: odometry checks every 1.5 s; triggers escape if no movement
+  - Escape: back up, turn toward most open direction, resume
 
 Usage (after slam_launch.py is running):
   ros2 run delivery_robot slam_explorer
@@ -20,6 +22,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
 
 
 def _vel(linear=0.0, angular=0.0):
@@ -32,11 +35,17 @@ def _vel(linear=0.0, angular=0.0):
 STOP = _vel()
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
-FORWARD_SPEED    = 0.18   # m/s — slow for clean LIDAR sweeps
+FORWARD_SPEED    = 0.18   # m/s
 TURN_SPEED       = 0.55   # rad/s
 TARGET_WALL_DIST = 0.55   # desired distance from right wall (m)
-FRONT_WARN_DIST  = 0.65   # slow/turn when this close ahead
-FRONT_STOP_DIST  = 0.45   # hard stop/turn threshold
+FRONT_WARN_DIST  = 0.65   # begin turning when this close ahead
+FRONT_STOP_DIST  = 0.45   # hard stop threshold
+
+STUCK_TIMEOUT    = 1.5    # seconds without movement → stuck
+STUCK_MOVE_THR   = 0.04   # metres — minimum movement to not be "stuck"
+ESCAPE_BACK_T    = 1.4    # seconds of reverse during escape
+ESCAPE_TURN_T    = 1.6    # seconds of turn during escape
+
 EXPLORE_SECONDS  = 260    # total mapping time (~4.5 min)
 
 
@@ -46,95 +55,176 @@ class SlamExplorer(Node):
         super().__init__('slam_explorer')
         self._pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
-        scan_qos = QoSProfile(
+        qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             depth=5,
         )
         self._scan_sub = self.create_subscription(
-            LaserScan, '/scan', self._scan_cb, scan_qos)
+            LaserScan, '/scan', self._scan_cb, qos)
+        self._odom_sub = self.create_subscription(
+            Odometry, '/odom', self._odom_cb, qos)
+
         self._scan = None
+        self._x = 0.0
+        self._y = 0.0
+
+        # Stuck detection state
+        self._last_check_time = time.time()
+        self._last_check_x    = 0.0
+        self._last_check_y    = 0.0
+        self._escape_count    = 0
+
+    # ── Callbacks ─────────────────────────────────────────────────────────────
 
     def _scan_cb(self, msg: LaserScan):
         self._scan = msg
+
+    def _odom_cb(self, msg: Odometry):
+        self._x = msg.pose.pose.position.x
+        self._y = msg.pose.pose.position.y
 
     def _tick(self):
         rclpy.spin_once(self, timeout_sec=0.05)
 
     # ── LIDAR helpers ─────────────────────────────────────────────────────────
 
-    def _sector(self, scan: LaserScan, idx_start: int, idx_end: int) -> float:
+    def _sector_min(self, scan: LaserScan, idx_start: int, idx_end: int) -> float:
         """
-        Return the minimum valid range in a sector of the scan array.
-        Indices wrap around (modulo len).
+        Minimum valid range in an index slice of the scan.
 
-        LIDAR layout for this robot (360 samples, angle_min=-pi):
-          index   0 = -180 deg (directly behind)
-          index  90 = -90  deg (right)
-          index 180 =   0  deg (forward)
-          index 270 = +90  deg (left)
+        LIDAR layout (360 samples, angle_min = -pi):
+          index   0 = -180 deg (behind)
+          index  90 = - 90 deg (right)
+          index 180 =    0 deg (forward)
+          index 270 = + 90 deg (left)
         """
         n = len(scan.ranges)
-        vals = []
-        for i in range(idx_start, idx_end):
-            r = scan.ranges[i % n]
-            if math.isfinite(r) and r > 0.12:
-                vals.append(r)
+        vals = [
+            scan.ranges[i % n]
+            for i in range(idx_start, idx_end)
+            if math.isfinite(scan.ranges[i % n]) and scan.ranges[i % n] > 0.12
+        ]
         return min(vals) if vals else float('inf')
+
+    def _most_open_direction(self, scan: LaserScan) -> float:
+        """Return angular velocity that steers toward the most open direction."""
+        left  = self._sector_min(scan, 220, 270)
+        right = self._sector_min(scan,  90, 140)
+        # positive angular = turn left (CCW), negative = turn right (CW)
+        return TURN_SPEED if left >= right else -TURN_SPEED
+
+    # ── Stuck detection ───────────────────────────────────────────────────────
+
+    def _is_stuck(self) -> bool:
+        now = time.time()
+        if now - self._last_check_time < STUCK_TIMEOUT:
+            return False
+        dist = math.hypot(self._x - self._last_check_x,
+                          self._y - self._last_check_y)
+        self._last_check_time = now
+        self._last_check_x    = self._x
+        self._last_check_y    = self._y
+        return dist < STUCK_MOVE_THR
+
+    def _reset_stuck_timer(self):
+        self._last_check_time = time.time()
+        self._last_check_x    = self._x
+        self._last_check_y    = self._y
+
+    # ── Escape maneuver ───────────────────────────────────────────────────────
+
+    def _escape(self):
+        """
+        Back up then turn toward the most open direction.
+        Called whenever stuck detection fires.
+        """
+        self._escape_count += 1
+        self.get_logger().warn(
+            f'STUCK detected (escape #{self._escape_count}) — executing escape maneuver')
+
+        # Phase 1: reverse away from obstacle
+        end = time.time() + ESCAPE_BACK_T
+        while time.time() < end:
+            self._tick()
+            self._pub.publish(_vel(-FORWARD_SPEED, 0.0))
+            time.sleep(0.05)
+
+        # Phase 2: turn toward most open space
+        turn_dir = self._most_open_direction(self._scan) if self._scan else TURN_SPEED
+        end = time.time() + ESCAPE_TURN_T
+        while time.time() < end:
+            self._tick()
+            self._pub.publish(_vel(0.0, turn_dir))
+            time.sleep(0.05)
+
+        self._pub.publish(STOP)
+        self._reset_stuck_timer()
+        self.get_logger().info('Escape complete — resuming wall following')
 
     # ── Wall-follower logic ───────────────────────────────────────────────────
 
     def _compute_cmd(self, scan: LaserScan) -> Twist:
         """
-        Right-hand wall follower with four rules (priority order):
-          1. Front blocked        → turn left in place
-          2. Front-right corner   → gentle left steer
-          3. Right gap / opening  → turn right into new room
-          4. Normal wall tracking → proportional correction
+        Right-hand wall follower — priority rules:
+
+          1. Completely boxed in (front + both sides)  → back up immediately
+          2. Front blocked                              → turn toward open side
+          3. Front-right corner closing in              → gentle left steer
+          4. Right gap / doorway                        → enter it (turn right)
+          5. Normal                                     → proportional wall track
         """
-        front        = self._sector(scan, 168, 193)   # ±12° forward
-        front_right  = self._sector(scan, 128, 168)   # 12–52° right of forward
-        right        = self._sector(scan,  78, 103)   # ±12° right
-        front_left   = self._sector(scan, 193, 233)   # 12–52° left of forward
+        front       = self._sector_min(scan, 168, 193)   # ±12° forward
+        front_right = self._sector_min(scan, 128, 168)   # 12–52° right-forward
+        front_left  = self._sector_min(scan, 193, 233)   # 12–52° left-forward
+        right       = self._sector_min(scan,  78, 103)   # ±12° right
+        left        = self._sector_min(scan, 258, 283)   # ±12° left
+        rear        = self._sector_min(scan,   0,  30)   # ±15° behind
 
-        # Rule 1 — obstacle directly ahead
+        # Rule 1 — boxed in: front AND both sides close → back up
+        if front < FRONT_STOP_DIST and right < 0.40 and left < 0.40:
+            self.get_logger().warn('Boxed in — backing up')
+            return _vel(-FORWARD_SPEED, 0.0)
+
+        # Rule 2 — front blocked: turn toward more open side
         if front < FRONT_WARN_DIST:
-            speed  = 0.0 if front < FRONT_STOP_DIST else FORWARD_SPEED * 0.3
-            # Bias turn direction toward the more open side
-            turn   = TURN_SPEED * (1.2 if front_left >= front_right else 0.8)
-            return _vel(speed, turn)
+            speed    = 0.0 if front < FRONT_STOP_DIST else FORWARD_SPEED * 0.25
+            turn_dir = TURN_SPEED if front_left >= front_right else -TURN_SPEED
+            strength = 1.3 if front < FRONT_STOP_DIST else 1.0
+            return _vel(speed, turn_dir * strength)
 
-        # Rule 2 — wall closing in from front-right (approaching corner)
+        # Rule 3 — corner ahead on right side → steer left slightly
         if front_right < TARGET_WALL_DIST - 0.05:
-            return _vel(FORWARD_SPEED * 0.6, TURN_SPEED * 0.5)
+            return _vel(FORWARD_SPEED * 0.6, TURN_SPEED * 0.45)
 
-        # Rule 3 — opening on the right (doorway or new room)
+        # Rule 4 — opening on the right (doorway, new room) → enter it
         if right > TARGET_WALL_DIST + 0.35:
-            return _vel(FORWARD_SPEED * 0.8, -TURN_SPEED * 0.7)
+            return _vel(FORWARD_SPEED * 0.8, -TURN_SPEED * 0.65)
 
-        # Rule 4 — track the right wall with a proportional controller
-        error   = right - TARGET_WALL_DIST          # positive = too far
-        angular = -0.9 * error                      # turn right if too far
+        # Rule 5 — proportional right-wall tracking
+        error   = right - TARGET_WALL_DIST       # positive = too far from wall
+        angular = -0.9 * error                   # negative = steer right
         angular = max(-TURN_SPEED, min(TURN_SPEED, angular))
         return _vel(FORWARD_SPEED, angular)
 
-    # ── Main loop ─────────────────────────────────────────────────────────────
+    # ── Main exploration loop ─────────────────────────────────────────────────
 
     def explore(self):
-        self.get_logger().info('Waiting for LIDAR...')
+        self.get_logger().info('Waiting for LIDAR scan...')
         while self._scan is None:
             self._tick()
             time.sleep(0.05)
 
-        time.sleep(3.0)   # let slam_toolbox initialise
+        time.sleep(3.0)   # let slam_toolbox warm up
+
+        self._reset_stuck_timer()
+        start    = time.time()
+        last_log = 0
 
         self.get_logger().info('╔══════════════════════════════════════════╗')
         self.get_logger().info('║  SLAM Explorer — LIDAR wall follower     ║')
-        self.get_logger().info(f'║  Mapping for {EXPLORE_SECONDS} s — watch RViz2 map  ║')
+        self.get_logger().info(f'║  Mapping for {EXPLORE_SECONDS}s  (escape logic ON)  ║')
         self.get_logger().info('╚══════════════════════════════════════════╝')
-
-        start = time.time()
-        last_log = 0
 
         while True:
             self._tick()
@@ -143,17 +233,24 @@ class SlamExplorer(Node):
             if elapsed >= EXPLORE_SECONDS:
                 break
 
-            # Progress log every 30 s
-            if int(elapsed) // 30 > last_log:
-                last_log = int(elapsed) // 30
-                remaining = EXPLORE_SECONDS - elapsed
+            # Progress every 30 s
+            bucket = int(elapsed) // 30
+            if bucket > last_log:
+                last_log = bucket
                 self.get_logger().info(
-                    f'  Mapping... {elapsed:.0f}s elapsed, {remaining:.0f}s remaining')
+                    f'  {elapsed:.0f}s elapsed — {EXPLORE_SECONDS - elapsed:.0f}s remaining'
+                    f'  (escapes so far: {self._escape_count})')
 
-            if self._scan is not None:
-                cmd = self._compute_cmd(self._scan)
-                self._pub.publish(cmd)
+            if self._scan is None:
+                continue
 
+            # Stuck check — fires every STUCK_TIMEOUT seconds
+            if self._is_stuck():
+                self._escape()
+                continue
+
+            cmd = self._compute_cmd(self._scan)
+            self._pub.publish(cmd)
             time.sleep(0.05)
 
         self._pub.publish(STOP)
