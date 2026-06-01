@@ -53,7 +53,8 @@ DELIVERY_ROOMS: dict[str, tuple[float, float, float]] = {
     "corridor_right": (7.50,  4.00,   90.0),
 }
 
-NAV_TIMEOUT_SEC = 120.0
+NAV_TIMEOUT_SEC   = 90.0    # s — max time per navigation goal
+DELIVERY_PAUSE_SEC = 5.0    # s — robot pauses at each drop-off location
 
 # Colour constants for payload marker
 _GREEN  = ColorRGBA(r=0.1, g=0.9, b=0.1, a=0.95)
@@ -297,7 +298,7 @@ class DeliveryMission(Node):
             f'DELIVERY: placing package at [{room_name}] ({x:.2f},{y:.2f})')
         self._publish_status(f'delivering:{room_name}')
 
-        # Delivery spin
+        # Delivery spin (one full rotation at 1 rad/s)
         self._spin(duration=2.0 * math.pi, angular_z=1.0)
 
         # Place delivery_item at destination in Gazebo world
@@ -307,6 +308,12 @@ class DeliveryMission(Node):
         self._state = State.IDLE
         self.get_logger().info(f'DELIVERY: package delivered at [{room_name}] ✓')
         self._publish_status(f'delivered:{room_name}')
+
+        # Pause at the delivery location so the drop-off is clearly visible
+        self.get_logger().info(
+            f'Pausing {DELIVERY_PAUSE_SEC:.0f} s at [{room_name}]...')
+        time.sleep(DELIVERY_PAUSE_SEC)
+        self.get_logger().info('Pause complete — proceeding.')
 
     def _spin(self, duration: float, angular_z: float) -> None:
         msg = Twist()

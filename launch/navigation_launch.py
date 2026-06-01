@@ -162,10 +162,20 @@ def generate_launch_description():
         'default_nav_through_poses_bt_xml': nav_through_poses_bt_xml,
     }
 
+    # ── cmd_vel chain ────────────────────────────────────────────────────────
+    # controller_server  →  cmd_vel_nav
+    # velocity_smoother  →  cmd_vel_smoothed   (subscribes cmd_vel_nav)
+    # collision_monitor  →  cmd_vel            (subscribes cmd_vel_smoothed)
+    # robot              ←  cmd_vel
+    #
+    # Without these remappings, controller_server and collision_monitor both
+    # publish to /cmd_vel simultaneously, creating a feedback loop that
+    # results in the robot receiving conflicting (near-zero) velocity commands.
     controller_server = Node(
         package='nav2_controller', executable='controller_server',
         name='controller_server', output='screen',
         parameters=[params, {'use_sim_time': use_sim_time}],
+        remappings=[('cmd_vel', 'cmd_vel_nav')],
     )
     smoother_server = Node(
         package='nav2_smoother', executable='smoother_server',
@@ -181,6 +191,7 @@ def generate_launch_description():
         package='nav2_behaviors', executable='behavior_server',
         name='behavior_server', output='screen',
         parameters=[params, {'use_sim_time': use_sim_time}],
+        remappings=[('cmd_vel', 'cmd_vel_nav')],
     )
     bt_navigator = Node(
         package='nav2_bt_navigator', executable='bt_navigator',
@@ -196,6 +207,7 @@ def generate_launch_description():
         package='nav2_velocity_smoother', executable='velocity_smoother',
         name='velocity_smoother', output='screen',
         parameters=[params, {'use_sim_time': use_sim_time}],
+        remappings=[('cmd_vel', 'cmd_vel_nav')],          # subscribe to controller output
     )
     collision_monitor = Node(
         package='nav2_collision_monitor', executable='collision_monitor',
