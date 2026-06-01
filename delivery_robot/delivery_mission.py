@@ -182,6 +182,10 @@ class DeliveryMission(Node):
         req.state.reference_frame = 'world'
         self._gz_client.call_async(req)
 
+    def _show_delivery_item_at_base(self) -> None:
+        """Respawn the package at the base station ready for pickup."""
+        self._gz_move('delivery_item', 0.8, 2.3, 0.15)
+
     def _hide_delivery_item(self) -> None:
         """Move the Gazebo delivery_item model out of sight (picked up)."""
         self._gz_move('delivery_item', 0.0, 0.0, -5.0)
@@ -218,7 +222,9 @@ class DeliveryMission(Node):
         self._publish_status(f'navigating:{room_name}')
 
         if not self._nav_client.wait_for_server(timeout_sec=15.0):
-            self.get_logger().error('navigate_to_pose action server not available')
+            self.get_logger().error(
+                'navigate_to_pose action server not available. '
+                'Is navigation_launch.py running and fully started?')
             return False
 
         goal = self._build_goal(x, y, yaw)
@@ -264,19 +270,23 @@ class DeliveryMission(Node):
     def _pickup_sequence(self) -> None:
         """Simulate picking up the package at the base station."""
         self._state = State.PICKING_UP
-        self.get_logger().info('PICKUP: loading package...')
+        self.get_logger().info('PICKUP: loading package at base station...')
         self._publish_status('pickup:base')
+
+        # Respawn the Gazebo package model at the base so it appears for pickup
+        self._show_delivery_item_at_base()
+        time.sleep(0.3)
 
         # Brief spin to "scan" the pickup area
         self._spin(duration=2.5, angular_z=0.8)
         time.sleep(0.5)
 
-        # Move Gazebo delivery_item out of sight (it has been picked up)
+        # Package is now on the robot — hide the Gazebo ground model
         self._hide_delivery_item()
 
         self._has_payload = True
         self._state = State.LOADED
-        self.get_logger().info('PICKUP: package loaded — robot is now LOADED')
+        self.get_logger().info('PICKUP: package loaded ✓')
         self._publish_status('loaded')
 
     def _dropoff_sequence(self, room_name: str) -> None:
@@ -294,8 +304,8 @@ class DeliveryMission(Node):
         self._place_delivery_item(x, y)
 
         self._has_payload = False
-        self._state = State.LOADED
-        self.get_logger().info(f'DELIVERY: package delivered at [{room_name}]')
+        self._state = State.IDLE
+        self.get_logger().info(f'DELIVERY: package delivered at [{room_name}] ✓')
         self._publish_status(f'delivered:{room_name}')
 
     def _spin(self, duration: float, angular_z: float) -> None:
@@ -315,48 +325,100 @@ class DeliveryMission(Node):
         return_to_base: bool = True,
         loop: bool = False,
     ) -> bool:
+        """
+        Execute a delivery route.
+
+        For each stop:
+          1. Navigate to base station for pickup
+          2. Pick up package (spin + green marker)
+          3. Navigate to delivery room
+          4. Deliver package (spin + place Gazebo model)
+
+        After all stops: return to base (if return_to_base=True).
+        With --no-return, step 1 and the final return are skipped.
+        """
         if not stops:
             self.get_logger().warn('No stops specified.')
             return False
 
-        route = stops + (['base'] if return_to_base else [])
+        # ── Wait for Nav2 before doing anything ───────────────────────────────
+        self.get_logger().info(
+            'Waiting for navigate_to_pose server (up to 30 s)...\n'
+            'Make sure navigation_launch.py is running!')
+        if not self._nav_client.wait_for_server(timeout_sec=30.0):
+            self.get_logger().error(
+                'navigate_to_pose server not available after 30 s.\n'
+                'Start the navigation stack first:\n'
+                '  ros2 launch delivery_robot navigation_launch.py')
+            return False
+        self.get_logger().info('Nav2 ready — starting mission.')
 
         iteration = 0
         while True:
             iteration += 1
-            label = f'(loop {iteration})' if loop else ''
+            label = f' (loop {iteration})' if loop else ''
             self.get_logger().info(
-                f'Route {label}: {" → ".join(route)}')
-            self._publish_status(f'mission_start:{",".join(route)}')
-
-            # Always pick up from base first
-            self._pickup_sequence()
+                f'Mission{label}: {len(stops)} stop(s) → {" → ".join(stops)}')
+            self._publish_status(f'mission_start:{",".join(stops)}')
 
             all_ok = True
-            for i, room in enumerate(route, 1):
+
+            for i, room in enumerate(stops, 1):
+                if self._cancelled:
+                    break
+
                 self.get_logger().info(
-                    f'Stop {i}/{len(route)}: [{room}]')
+                    f'─── Delivery {i}/{len(stops)}: [{room}] ───')
+
+                # ── Step 1: navigate to base for pickup ───────────────────
+                if return_to_base:
+                    self._state = State.NAVIGATING
+                    self.get_logger().info('Going to base station for pickup...')
+                    ok = self.navigate_to_room('base')
+                    if not ok:
+                        self.get_logger().error(
+                            'Could not reach base station — aborting mission')
+                        all_ok = False
+                        self._publish_status('mission_aborted')
+                        break
+
+                # ── Step 2: pick up ───────────────────────────────────────
+                self._pickup_sequence()
+
+                # ── Step 3: navigate to delivery room ─────────────────────
                 self._state = State.NAVIGATING
                 success = self.navigate_to_room(room)
 
                 if not success:
                     all_ok = False
-                    if room != 'base' and return_to_base:
-                        self.get_logger().info('Emergency return to base...')
-                        self._has_payload = False
+                    self.get_logger().warn(
+                        f'Failed to reach [{room}] — dropping payload and returning to base')
+                    self._has_payload = False
+                    if return_to_base:
+                        self._state = State.RETURNING
                         self.navigate_to_room('base')
                     self._publish_status('mission_aborted')
                     break
 
-                if room != 'base':
-                    self._dropoff_sequence(room)
+                # ── Step 4: deliver ───────────────────────────────────────
+                self._dropoff_sequence(room)
+
+            # ── Final return to base after all stops ──────────────────────
+            if all_ok and return_to_base and not self._cancelled:
+                self._state = State.RETURNING
+                self.get_logger().info('All stops done — returning to base...')
+                self._publish_status('returning:base')
+                ok = self.navigate_to_room('base')
+                self._state = State.IDLE
+                if ok:
+                    self.get_logger().info('Back at base station ✓')
+                    self._publish_status('arrived:base')
                 else:
-                    # Returned to base — reload for next loop if needed
-                    self._state = State.RETURNING
-                    self.get_logger().info('Returned to base station.')
+                    self.get_logger().warn('Could not complete final return to base')
 
             if all_ok:
-                self.get_logger().info('Mission complete! All packages delivered.')
+                self.get_logger().info(
+                    f'Mission complete! {len(stops)} package(s) delivered.')
                 self._publish_status('mission_complete')
 
             if not loop:
