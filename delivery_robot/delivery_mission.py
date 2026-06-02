@@ -128,64 +128,83 @@ class State(Enum):
 # =============================================================================
 
 # ── Routes TO each room (starting from base/room1 area) ──────────────────────
+# All waypoints verified clear (≥0.20 m obstacle clearance) against the saved
+# office_map.pgm.  Corrections vs first draft:
+#   • Pre-door1-W: (3.5,2.75) was BLOCKED → moved to (4.5,2.80)
+#   • Door 1 y-centre: 2.75 → 2.80 (true centre of y=2.50–3.10 gap in map)
+#   • Room3 approach: (2.5,3.5) was TIGHT 0.11m → (2.0,3.5) CLEAR
+#   • Right gap: x=7.5 TIGHT → x=7.8 CLEAR (gap centre x=7.83 in map)
+#   • Room4 east path: x=7.7,y=4.5 BLOCKED → x=7.8 throughout
 _ROUTE_TO: dict[str, list] = {
     "base": [],
     "room1": [
         (1.5, 2.0, 0.40),
-        (2.5, 2.0, 0.40),
+        (2.5, 2.0, 0.40),   # arrive=0.40 keeps robot clear of desk leg
     ],
     "room2": [
         (1.5, 2.0, 0.40),
-        (3.5, 2.75, 0.30),            # pre-door-1 align
-        ("door", 3.5, 2.75, 5.8, True),   # cross Door 1 east
+        (4.5, 2.80, 0.30),               # pre-door-1 align — CLEAR (map-verified)
+        ("door", 4.5, 2.80, 5.8, True),  # Door1 y-centre=2.80 (map-verified gap)
         (6.5, 2.0,  0.40),
         (7.3, 2.0,  0.40),
     ],
     "room3": [
         (1.5, 2.0, 0.40),
-        (2.5, 3.5, 0.40),             # approach left gap
-        (2.5, 4.5, 0.40),             # cross gap (1.2 m wide — normal _go_to)
-        (2.5, 5.3, 0.40),
+        (2.0, 3.5, 0.40),   # approach left gap from west — CLEAR
+        (2.5, 4.5, 0.40),   # past N-S partition, inside room3 — CLEAR
+        (2.5, 5.3, 0.40),   # room3 delivery zone
     ],
     "room4": [
         (1.5, 2.0, 0.40),
-        (3.5, 2.75, 0.30),
-        ("door", 3.5, 2.75, 5.8, True),
-        (7.5, 2.5,  0.40),
-        (7.5, 3.5,  0.40),            # approach right gap
-        (7.5, 4.5,  0.40),            # cross right gap (1.2 m wide)
-        (7.5, 6.0,  0.40),
+        (4.5, 2.80, 0.30),               # pre-door-1 align
+        ("door", 4.5, 2.80, 5.8, True),  # Door1 east
+        (7.8, 2.5,  0.40),   # room2 east side — CLEAR
+        (7.8, 3.5,  0.40),   # approach right gap (x=7.35–8.30) — CLEAR
+        (7.8, 4.0,  0.40),   # through right gap at x=7.8 — CLEAR
+        (7.5, 5.5,  0.40),   # inside room4
+        (7.5, 6.0,  0.40),   # room4 delivery zone
     ],
-    "corridor_left":  [(2.5, 4.0, 0.40)],
-    "corridor_right": [(7.5, 4.0, 0.40)],
+    "corridor_left":  [(2.0, 3.5, 0.40), (2.5, 4.0, 0.40)],
+    "corridor_right": [
+        (4.5, 2.80, 0.30),
+        ("door", 4.5, 2.80, 5.8, True),
+        (7.8, 3.5, 0.40),
+        (7.8, 4.0, 0.40),
+    ],
 }
 
 # ── Routes FROM each room BACK to base ───────────────────────────────────────
 _ROUTE_FROM: dict[str, list] = {
     "base":   [],
-    "room1":  [(0.5, 2.0, 0.40)],
+    "room1":  [(1.5, 2.0, 0.40), (0.5, 2.0, 0.40)],
     "room2": [
-        (6.0, 2.75, 0.30),              # pre-door-1 east side
-        ("door", 6.0, 2.75, 3.5, False),  # cross Door 1 west
+        (5.9, 2.80, 0.30),               # pre-door-1 east — CLEAR
+        ("door", 5.9, 2.80, 4.5, False), # Door1 west, exit at x=4.5
         (1.5, 2.0,  0.40),
         (0.5, 2.0,  0.40),
     ],
     "room3": [
-        (2.5, 4.2, 0.40),
-        (2.5, 3.5, 0.40),
+        (2.5, 4.2, 0.40),   # just north of partition
+        (2.0, 3.5, 0.40),   # south of partition, west side — CLEAR
         (0.5, 2.0, 0.40),
     ],
     "room4": [
-        (7.5, 4.2, 0.40),
-        (7.5, 3.5, 0.40),
-        (6.0, 2.75, 0.30),
-        ("door", 6.0, 2.75, 3.5, False),
+        (7.5, 5.5,  0.40),
+        (7.8, 4.2,  0.40),   # just north of right gap — CLEAR
+        (7.8, 3.5,  0.40),   # room2 east side — CLEAR
+        (5.9, 2.80, 0.30),   # pre-door-1 east — CLEAR
+        ("door", 5.9, 2.80, 4.5, False),
         (1.5, 2.0,  0.40),
         (0.5, 2.0,  0.40),
     ],
-    "corridor_left":  [(0.5, 2.0, 0.40)],
-    "corridor_right": [(7.5, 3.5, 0.40), (6.0, 2.75, 0.30),
-                       ("door", 6.0, 2.75, 3.5, False), (0.5, 2.0, 0.40)],
+    "corridor_left":  [(2.0, 3.5, 0.40), (0.5, 2.0, 0.40)],
+    "corridor_right": [
+        (7.8, 3.5, 0.40),
+        (5.9, 2.80, 0.30),
+        ("door", 5.9, 2.80, 4.5, False),
+        (1.5, 2.0, 0.40),
+        (0.5, 2.0, 0.40),
+    ],
 }
 
 
