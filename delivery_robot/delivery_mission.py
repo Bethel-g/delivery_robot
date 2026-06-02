@@ -1,22 +1,35 @@
 #!/usr/bin/env python3
 """
-delivery_mission.py — Autonomous Delivery Mission Node
-=======================================================
-Orchestrates a full pick-up → navigate → deliver → return cycle.
+delivery_mission.py — Autonomous Delivery Mission (LIDAR-Based Navigation)
+==========================================================================
+Uses the same proven LIDAR/odometry navigation engine as slam_explorer.py
+instead of Nav2, guaranteeing correct routing through all rooms and doors.
 
-State machine:
-  IDLE → PICKING_UP (at base) → LOADED → NAVIGATING → DELIVERING → RETURNING
+World layout (10 m × 8 m)
+--------------------------
+  Room 1 (SW)  x 0.1–5.1  y 0.1–3.9   ← base station here (0.5, 2.0)
+  Room 2 (SE)  x 5.3–9.9  y 0.1–3.9
+  Room 3 (NW)  x 0.1–5.1  y 4.1–7.9
+  Room 4 (NE)  x 5.3–9.9  y 4.1–7.9
 
-Visual feedback:
-  • /payload_marker  (visualization_msgs/Marker)   — green box above robot
-  • /delivery_status (std_msgs/String)              — mission event strings
-  • /gazebo/set_entity_state                        — moves delivery_item model
+Crossing points
+  Door 1  R1↔R2  x≈5.21  y-gap centre 2.75  (0.70 m clear)  → _cross_door
+  Door 2  R3↔R4  x≈5.21  y-gap centre 6.25  (0.90 m clear)  → _cross_door
+  Left gap  R1↔R3  y≈4  x-gap centre 2.5   (1.20 m clear)  → normal _go_to
+  Right gap R2↔R4  y≈4  x-gap centre 7.5   (1.20 m clear)  → normal _go_to
 
-Usage (after launching navigation_launch.py):
+Mission flow per stop
+  1. Navigate to base station for pickup
+  2. Pick up package (spin + Gazebo model appears/disappears)
+  3. Navigate to delivery room via waypoint chain
+  4. Deliver package (spin + Gazebo model placed + 5 s pause)
+  After all stops: return to base.
+
+Usage (after slam_launch.py has built the map — Nav2 NOT required):
   ros2 run delivery_robot delivery_mission room1 room3 room2
-  ros2 run delivery_robot delivery_mission --list
   ros2 run delivery_robot delivery_mission --loop room1 room2
-  ros2 run delivery_robot delivery_mission --algorithm mppi room1 room2
+  ros2 run delivery_robot delivery_mission --no-return room1
+  ros2 run delivery_robot delivery_mission --list
 """
 
 import sys
@@ -27,21 +40,18 @@ from enum import Enum, auto
 
 import rclpy
 from rclpy.node import Node
-from rclpy.action import ActionClient
-from rclpy.action.client import ClientGoalHandle
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
-from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, Twist
-from nav2_msgs.action import NavigateToPose
+from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String, ColorRGBA
 from visualization_msgs.msg import Marker
 from gazebo_msgs.srv import SetEntityState
 
 
 # =============================================================================
-#  DELIVERY ROOMS — map-frame coordinates (x, y, yaw_deg)
+#  DELIVERY ROOMS — world/map-frame coordinates (x, y, yaw_deg)
 # =============================================================================
 DELIVERY_ROOMS: dict[str, tuple[float, float, float]] = {
     "base":           (0.50,  2.00,    0.0),
@@ -53,126 +63,460 @@ DELIVERY_ROOMS: dict[str, tuple[float, float, float]] = {
     "corridor_right": (7.50,  4.00,   90.0),
 }
 
-NAV_TIMEOUT_SEC   = 90.0    # s — max time per navigation goal
-DELIVERY_PAUSE_SEC = 5.0    # s — robot pauses at each drop-off location
+DELIVERY_PAUSE_SEC = 5.0    # pause at each drop-off so delivery is visible
 
-# Colour constants for payload marker
-_GREEN  = ColorRGBA(r=0.1, g=0.9, b=0.1, a=0.95)
-_GREY   = ColorRGBA(r=0.5, g=0.5, b=0.5, a=0.4)
+# =============================================================================
+#  NAVIGATION CONSTANTS  (tuned from slam_explorer.py)
+# =============================================================================
+CRUISE_SPEED  = 0.20   # m/s
+DOOR_SPEED    = 0.14   # m/s
+TURN_SPEED    = 0.50   # rad/s
+
+FRONT_STOP    = 0.35   # m  reverse threshold
+FRONT_WARN    = 0.65   # m  slow-down threshold
+DIAG_DIST     = 0.65   # m  diagonal avoidance
+DIAG_GAIN     = 0.80
+SIDE_DIST     = 0.28   # m  side avoidance
+SIDE_GAIN     = 0.45
+CORRIDOR_THR  = 0.65   # both sides < this → suppress diagonal avoidance
+
+STUCK_TIME    = 1.2    # s
+STUCK_THR     = 0.04   # m
+WP_TIMEOUT    = 40.0   # s per waypoint
+
+DOOR_Y_GAIN       = 3.5
+DOOR_HEAD_GAIN    = 2.0
+DOOR_PERP_TOL     = 0.05   # rad
+DOOR_CROSS_TOUT   = 22.0   # s
+DOOR_ALIGN_ARRIVE = 0.28   # m
+DOOR_MAX_TRIES    = 4
+
+_GREEN = ColorRGBA(r=0.1, g=0.9, b=0.1, a=0.95)
+
+
+def _vel(linear=0.0, angular=0.0) -> Twist:
+    t = Twist()
+    t.linear.x  = linear
+    t.angular.z = angular
+    return t
+
+
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def _wrap(a):
+    return ((a + math.pi) % (2 * math.pi)) - math.pi
+
+
+STOP = _vel()
 
 
 class State(Enum):
-    IDLE        = auto()
-    PICKING_UP  = auto()
-    LOADED      = auto()
-    NAVIGATING  = auto()
-    DELIVERING  = auto()
-    RETURNING   = auto()
+    IDLE       = auto()
+    NAVIGATING = auto()
+    PICKING_UP = auto()
+    LOADED     = auto()
+    DELIVERING = auto()
+    RETURNING  = auto()
 
 
-def yaw_to_quaternion(yaw_deg: float) -> tuple[float, float, float, float]:
-    yaw_rad = math.radians(yaw_deg)
-    return (0.0, 0.0, math.sin(yaw_rad / 2.0), math.cos(yaw_rad / 2.0))
+# =============================================================================
+#  WAYPOINT ROUTES
+#  Each entry is a list of (x, y, arrive_m) waypoints.
+#  'door' entries are handled by _cross_door() instead of _go_to().
+# =============================================================================
 
+# ── Routes TO each room (starting from base/room1 area) ──────────────────────
+_ROUTE_TO: dict[str, list] = {
+    "base": [],
+    "room1": [
+        (1.5, 2.0, 0.40),
+        (2.5, 2.0, 0.40),
+    ],
+    "room2": [
+        (1.5, 2.0, 0.40),
+        (3.5, 2.75, 0.30),            # pre-door-1 align
+        ("door", 3.5, 2.75, 5.8, True),   # cross Door 1 east
+        (6.5, 2.0,  0.40),
+        (7.3, 2.0,  0.40),
+    ],
+    "room3": [
+        (1.5, 2.0, 0.40),
+        (2.5, 3.5, 0.40),             # approach left gap
+        (2.5, 4.5, 0.40),             # cross gap (1.2 m wide — normal _go_to)
+        (2.5, 5.3, 0.40),
+    ],
+    "room4": [
+        (1.5, 2.0, 0.40),
+        (3.5, 2.75, 0.30),
+        ("door", 3.5, 2.75, 5.8, True),
+        (7.5, 2.5,  0.40),
+        (7.5, 3.5,  0.40),            # approach right gap
+        (7.5, 4.5,  0.40),            # cross right gap (1.2 m wide)
+        (7.5, 6.0,  0.40),
+    ],
+    "corridor_left":  [(2.5, 4.0, 0.40)],
+    "corridor_right": [(7.5, 4.0, 0.40)],
+}
+
+# ── Routes FROM each room BACK to base ───────────────────────────────────────
+_ROUTE_FROM: dict[str, list] = {
+    "base":   [],
+    "room1":  [(0.5, 2.0, 0.40)],
+    "room2": [
+        (6.0, 2.75, 0.30),              # pre-door-1 east side
+        ("door", 6.0, 2.75, 3.5, False),  # cross Door 1 west
+        (1.5, 2.0,  0.40),
+        (0.5, 2.0,  0.40),
+    ],
+    "room3": [
+        (2.5, 4.2, 0.40),
+        (2.5, 3.5, 0.40),
+        (0.5, 2.0, 0.40),
+    ],
+    "room4": [
+        (7.5, 4.2, 0.40),
+        (7.5, 3.5, 0.40),
+        (6.0, 2.75, 0.30),
+        ("door", 6.0, 2.75, 3.5, False),
+        (1.5, 2.0,  0.40),
+        (0.5, 2.0,  0.40),
+    ],
+    "corridor_left":  [(0.5, 2.0, 0.40)],
+    "corridor_right": [(7.5, 3.5, 0.40), (6.0, 2.75, 0.30),
+                       ("door", 6.0, 2.75, 3.5, False), (0.5, 2.0, 0.40)],
+}
+
+
+# =============================================================================
+#  DELIVERY MISSION NODE
+# =============================================================================
 
 class DeliveryMission(Node):
-    """
-    Autonomous delivery mission orchestrator.
-
-    Adds on top of the original:
-      • Delivery state machine with pickup / deliver phases
-      • RViz marker (green box) that follows the robot when payload is loaded
-      • Gazebo delivery_item model management via /gazebo/set_entity_state
-      • Algorithm label for metrics correlation
-    """
 
     def __init__(self):
         super().__init__('delivery_mission')
 
-        self.declare_parameter('algorithm', 'dwa')
-        self._algo = self.get_parameter('algorithm').value
+        self._pub     = self.create_publisher(Twist,  '/cmd_vel',          10)
+        self._status  = self.create_publisher(String, '/delivery_status',  10)
+        self._mkr_pub = self.create_publisher(Marker, '/payload_marker',   10)
 
-        # ── Action client ─────────────────────────────────────────────────
-        self._nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self._gz = self.create_client(SetEntityState, '/gazebo/set_entity_state')
 
-        # ── Publishers ────────────────────────────────────────────────────
-        self._status_pub  = self.create_publisher(String, '/delivery_status', 10)
-        self._vel_pub     = self.create_publisher(Twist,  '/cmd_vel', 10)
-        self._marker_pub  = self.create_publisher(Marker, '/payload_marker', 10)
-
-        # ── Gazebo state client (moves delivery_item in simulation) ───────
-        self._gz_client = self.create_client(
-            SetEntityState, '/gazebo/set_entity_state')
-
-        # ── Subscribers ───────────────────────────────────────────────────
-        odom_qos = QoSProfile(
+        qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE,
-            depth=5,
-        )
-        self._odom_sub = self.create_subscription(
-            Odometry, '/odom', self._odom_cb, odom_qos)
-        self._odom_x = 0.0
-        self._odom_y = 0.0
+            durability=DurabilityPolicy.VOLATILE, depth=5)
+        self.create_subscription(LaserScan, '/scan', self._scan_cb, qos)
+        self.create_subscription(Odometry,  '/odom', self._odom_cb, qos)
 
-        # ── State ─────────────────────────────────────────────────────────
-        self._state = State.IDLE
+        self._scan = None
+        self._x = self._y = self._yaw = 0.0
+        self._ck_t = time.time()
+        self._ck_x = self._ck_y = 0.0
+        self._esc_n = 0
+
+        self._state       = State.IDLE
         self._has_payload = False
-        self._cancelled = False
+        self._cancelled   = False
 
-        # Marker timer: refreshes the floating payload box at 5 Hz
-        self._marker_timer = self.create_timer(0.2, self._publish_marker)
-
+        self.create_timer(0.2, self._publish_marker)
         self.get_logger().info(
-            f'DeliveryMission ready  algorithm={self._algo}  '
-            f'rooms={list(DELIVERY_ROOMS.keys())}')
+            f'DeliveryMission ready  rooms={list(DELIVERY_ROOMS.keys())}')
 
-    # ── Callbacks ─────────────────────────────────────────────────────────
+    # ── ROS callbacks ─────────────────────────────────────────────────────────
 
-    def _odom_cb(self, msg: Odometry) -> None:
-        self._odom_x = msg.pose.pose.position.x
-        self._odom_y = msg.pose.pose.position.y
+    def _scan_cb(self, m):
+        self._scan = m
 
-    def _feedback_cb(self, feedback_msg) -> None:
-        fb = feedback_msg.feedback
-        self.get_logger().info(
-            f'   pos=({self._odom_x:.2f},{self._odom_y:.2f})  '
-            f'remaining={fb.distance_remaining:.2f} m  '
-            f'elapsed={fb.navigation_time.sec}.{fb.navigation_time.nanosec//1_000_000:03d} s',
-            throttle_duration_sec=3,
-        )
+    def _odom_cb(self, m):
+        p = m.pose.pose.position
+        q = m.pose.pose.orientation
+        self._x   = p.x
+        self._y   = p.y
+        self._yaw = math.atan2(
+            2 * (q.w * q.z + q.x * q.y),
+            1 - 2 * (q.y * q.y + q.z * q.z))
 
-    # ── Payload visual (RViz marker in base_link frame) ───────────────────
+    def _tick(self):
+        rclpy.spin_once(self, timeout_sec=0.05)
 
-    def _publish_marker(self) -> None:
+    # ── LIDAR helpers ─────────────────────────────────────────────────────────
+
+    def _smin(self, a, b):
+        if self._scan is None:
+            return float('inf')
+        n = len(self._scan.ranges)
+        v = [self._scan.ranges[i % n] for i in range(a, b)
+             if math.isfinite(self._scan.ranges[i % n])
+             and self._scan.ranges[i % n] > 0.12]
+        return min(v) if v else float('inf')
+
+    def _front(self): return self._smin(165, 195)
+    def _back(self):  return self._smin(345, 375)
+
+    def _most_open(self):
+        if self._scan is None:
+            return TURN_SPEED
+        l = self._smin(225, 315)
+        r = self._smin(45,  135)
+        f = self._smin(157, 203)
+        b = self._back()
+        if b >= f and b >= l and b >= r:
+            return 0.0
+        if l >= r and l >= f:
+            return  TURN_SPEED
+        if r >= l and r >= f:
+            return -TURN_SPEED
+        return TURN_SPEED if l >= r else -TURN_SPEED
+
+    # ── Stuck detection ───────────────────────────────────────────────────────
+
+    def _is_stuck(self):
+        now = time.time()
+        if now - self._ck_t < STUCK_TIME:
+            return False
+        d = math.hypot(self._x - self._ck_x, self._y - self._ck_y)
+        self._ck_t = now
+        self._ck_x = self._x
+        self._ck_y = self._y
+        return d < STUCK_THR
+
+    def _rst_stuck(self):
+        self._ck_t = time.time()
+        self._ck_x = self._x
+        self._ck_y = self._y
+
+    # ── Escape ────────────────────────────────────────────────────────────────
+
+    def _escape(self):
+        self._esc_n += 1
+        self.get_logger().warn(
+            f'Escape #{self._esc_n} at ({self._x:.1f},{self._y:.1f})')
+
+        f = self._smin(157, 203)
+        l = self._smin(225, 315)
+        r = self._smin(45,  135)
+        b = self._back()
+
+        pocket = (b >= f and b >= l and b >= r) or \
+                 (l < FRONT_WARN and r < FRONT_WARN and b > FRONT_STOP)
+
+        if pocket:
+            self.get_logger().warn(
+                f'  pocket detected f={f:.2f} l={l:.2f} r={r:.2f} b={b:.2f}')
+            for _ in range(int(2.0 / 0.05)):
+                self._tick()
+                if self._back() < 0.28:
+                    break
+                self._pub.publish(_vel(-CRUISE_SPEED * 0.55, 0.0))
+                time.sleep(0.05)
+            self._pub.publish(STOP)
+            time.sleep(0.08)
+            td = TURN_SPEED if l >= r else -TURN_SPEED
+            if self._esc_n % 2 == 0:
+                td = -td
+            for _ in range(int(1.2 / 0.05)):
+                self._tick()
+                self._pub.publish(_vel(0.0, td))
+                time.sleep(0.05)
+        else:
+            td = self._most_open()
+            if td == 0.0:
+                td = TURN_SPEED
+            if self._esc_n % 3 == 0:
+                td = -td
+            scale = 1.0 if self._esc_n <= 2 else (1.5 if self._esc_n <= 5 else 2.5)
+            for _ in range(int(1.4 / 0.05)):
+                self._tick()
+                self._pub.publish(_vel(-CRUISE_SPEED * 0.65, td * 0.45))
+                time.sleep(0.05)
+            for _ in range(int(1.0 * scale / 0.05)):
+                self._tick()
+                if self._front() < FRONT_WARN:
+                    break
+                self._pub.publish(_vel(CRUISE_SPEED, td * 0.25))
+                time.sleep(0.05)
+
+        self._pub.publish(STOP)
+        self._rst_stuck()
+        self.get_logger().info('Escape done')
+
+    # ── Waypoint navigation ───────────────────────────────────────────────────
+
+    def _go_to(self, tx, ty, arrive=0.40) -> bool:
+        deadline = time.time() + WP_TIMEOUT
+        self._rst_stuck()
+
+        while time.time() < deadline:
+            self._tick()
+            if self._cancelled:
+                self._pub.publish(STOP)
+                return False
+
+            dx, dy = tx - self._x, ty - self._y
+            if math.hypot(dx, dy) < arrive:
+                return True
+
+            err = _wrap(math.atan2(dy, dx) - self._yaw)
+            fd  = self._front()
+
+            dr = self._smin(125, 165)
+            dl = self._smin(195, 235)
+            sr = self._smin(78,  103)
+            sl = self._smin(258, 283)
+
+            in_corridor = sl < CORRIDOR_THR and sr < CORRIDOR_THR
+
+            avoid = 0.0
+            if not in_corridor:
+                if dr < DIAG_DIST:
+                    avoid += TURN_SPEED * DIAG_GAIN * (1 - dr / DIAG_DIST)
+                if dl < DIAG_DIST:
+                    avoid -= TURN_SPEED * DIAG_GAIN * (1 - dl / DIAG_DIST)
+            if sr < SIDE_DIST:
+                avoid += TURN_SPEED * SIDE_GAIN * (1 - sr / SIDE_DIST)
+            if sl < SIDE_DIST:
+                avoid -= TURN_SPEED * SIDE_GAIN * (1 - sl / SIDE_DIST)
+
+            target_ang = _clamp(2.5 * err, -TURN_SPEED, TURN_SPEED)
+
+            if fd < FRONT_STOP:
+                open_ang = self._most_open()
+                if open_ang == 0.0:
+                    ang = _clamp(avoid, -TURN_SPEED * 0.3, TURN_SPEED * 0.3)
+                else:
+                    ang = _clamp(open_ang + avoid, -TURN_SPEED, TURN_SPEED)
+                spd = -CRUISE_SPEED * 0.35
+            elif fd < FRONT_WARN:
+                frac = _clamp(
+                    (fd - FRONT_STOP) / (FRONT_WARN - FRONT_STOP), 0, 1)
+                open_ang = self._most_open()
+                ang = _clamp(
+                    frac * target_ang + (1 - frac) * open_ang + avoid,
+                    -TURN_SPEED, TURN_SPEED)
+                spd = max(CRUISE_SPEED * 0.12, CRUISE_SPEED * 0.45 * frac)
+            else:
+                ang = _clamp(target_ang + avoid, -TURN_SPEED, TURN_SPEED)
+                spd = CRUISE_SPEED if abs(err) < 0.7 else CRUISE_SPEED * 0.4
+
+            self._pub.publish(_vel(spd, ang))
+            time.sleep(0.05)
+
+            if self._is_stuck():
+                self._escape()
+
+        self.get_logger().warn(f'_go_to timeout → ({tx:.1f},{ty:.1f})')
+        return False
+
+    def _turn_to(self, yaw, tol=DOOR_PERP_TOL, timeout=8.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self._tick()
+            err = _wrap(yaw - self._yaw)
+            if abs(err) < tol:
+                break
+            self._pub.publish(_vel(0.0, math.copysign(TURN_SPEED * 0.38, err)))
+            time.sleep(0.05)
+        self._pub.publish(STOP)
+        time.sleep(0.12)
+
+    def _cross_door(self, pre_x, door_y, exit_x, east=True) -> bool:
+        ty   = 0.0 if east else math.pi
+        sign = 1   if east else -1
+
+        for attempt in range(1, DOOR_MAX_TRIES + 1):
+            self.get_logger().info(
+                f'Door y={door_y:.2f} attempt {attempt}: aligning at x={pre_x:.1f}')
+            self._go_to(pre_x, door_y, DOOR_ALIGN_ARRIVE)
+            self._turn_to(ty)
+            self.get_logger().info(
+                f'Door y={door_y:.2f}: crossing '
+                f'({self._x:.2f},{self._y:.2f}) yaw={math.degrees(self._yaw):.1f}°')
+
+            crossed  = False
+            deadline = time.time() + DOOR_CROSS_TOUT
+            self._rst_stuck()
+
+            while time.time() < deadline:
+                self._tick()
+                if (exit_x - self._x) * sign <= 0.0:
+                    crossed = True
+                    break
+                if self._front() < 0.15:
+                    self.get_logger().warn('Door: blocked — backing out')
+                    break
+                ye  = door_y - self._y
+                he  = _wrap(ty - self._yaw)
+                ang = _clamp(ye * DOOR_Y_GAIN + he * DOOR_HEAD_GAIN,
+                             -TURN_SPEED * 0.35, TURN_SPEED * 0.35)
+                self._pub.publish(_vel(DOOR_SPEED, ang))
+                time.sleep(0.05)
+                if self._is_stuck():
+                    self.get_logger().warn('Door: stuck — backing out')
+                    break
+
+            self._pub.publish(STOP)
+
+            if crossed:
+                self.get_logger().info(f'Door y={door_y:.2f} crossed ✓')
+                return True
+
+            for _ in range(int(2.5 / 0.05)):
+                self._tick()
+                self._pub.publish(_vel(-CRUISE_SPEED))
+                time.sleep(0.05)
+            self._pub.publish(STOP)
+            self._rst_stuck()
+
+        self.get_logger().warn(f'Door y={door_y:.2f}: gave up after {DOOR_MAX_TRIES} tries')
+        return False
+
+    # ── Follow a waypoint chain ───────────────────────────────────────────────
+
+    def _follow_route(self, route: list, label='') -> bool:
+        for step in route:
+            if self._cancelled:
+                return False
+            if step[0] == 'door':
+                _, pre_x, door_y, exit_x, east = step
+                self.get_logger().info(
+                    f'[{label}] crossing door y={door_y:.2f}')
+                if not self._cross_door(pre_x, door_y, exit_x, east):
+                    return False
+            else:
+                x, y, a = step
+                self.get_logger().info(
+                    f'[{label}] → ({x:.1f},{y:.1f})')
+                self._go_to(x, y, a)
+        return True
+
+    # ── Payload marker ────────────────────────────────────────────────────────
+
+    def _publish_marker(self):
         m = Marker()
         m.header.stamp = self.get_clock().now().to_msg()
-        m.ns = 'payload'
-        m.id = 0
+        m.ns  = 'payload'
+        m.id  = 0
         m.type = Marker.CUBE
-
         if self._has_payload:
-            # Attached to robot: base_link frame, floats on top
             m.header.frame_id = 'base_link'
             m.action = Marker.ADD
             m.pose.position.z = 0.28
             m.scale.x = 0.22
             m.scale.y = 0.22
             m.scale.z = 0.18
-            m.color = _GREEN
-            m.lifetime.sec = 1          # auto-expires if not refreshed
+            m.color   = _GREEN
+            m.lifetime.sec = 1
         else:
-            # Hide the marker
             m.header.frame_id = 'map'
             m.action = Marker.DELETE
+        self._mkr_pub.publish(m)
 
-        self._marker_pub.publish(m)
+    # ── Gazebo helpers ────────────────────────────────────────────────────────
 
-    # ── Gazebo delivery_item control ──────────────────────────────────────
-
-    def _gz_move(self, name: str, x: float, y: float, z: float) -> None:
-        """Teleport a Gazebo model to (x, y, z) in the world frame."""
-        if not self._gz_client.service_is_ready():
+    def _gz_move(self, name, x, y, z):
+        if not self._gz.service_is_ready():
             return
         req = SetEntityState.Request()
         req.state.name = name
@@ -181,150 +525,59 @@ class DeliveryMission(Node):
         req.state.pose.position.z = float(z)
         req.state.pose.orientation.w = 1.0
         req.state.reference_frame = 'world'
-        self._gz_client.call_async(req)
+        self._gz.call_async(req)
 
-    def _show_delivery_item_at_base(self) -> None:
-        """Respawn the package at the base station ready for pickup."""
-        self._gz_move('delivery_item', 0.8, 2.3, 0.15)
+    def _show_item_at_base(self):  self._gz_move('delivery_item', 0.8, 2.3, 0.15)
+    def _hide_item(self):          self._gz_move('delivery_item', 0.0, 0.0, -5.0)
+    def _place_item(self, x, y):   self._gz_move('delivery_item', x,   y,   0.15)
 
-    def _hide_delivery_item(self) -> None:
-        """Move the Gazebo delivery_item model out of sight (picked up)."""
-        self._gz_move('delivery_item', 0.0, 0.0, -5.0)
+    # ── Delivery spin ─────────────────────────────────────────────────────────
 
-    def _place_delivery_item(self, x: float, y: float) -> None:
-        """Place delivery_item at the delivery destination."""
-        self._gz_move('delivery_item', x, y, 0.15)
-
-    # ── Core navigation ───────────────────────────────────────────────────
-
-    def _build_goal(self, x: float, y: float, yaw_deg: float) -> NavigateToPose.Goal:
-        goal = NavigateToPose.Goal()
-        pose = PoseStamped()
-        pose.header.frame_id = 'map'
-        pose.header.stamp = self.get_clock().now().to_msg()
-        pose.pose.position.x = x
-        pose.pose.position.y = y
-        qx, qy, qz, qw = yaw_to_quaternion(yaw_deg)
-        pose.pose.orientation.x = qx
-        pose.pose.orientation.y = qy
-        pose.pose.orientation.z = qz
-        pose.pose.orientation.w = qw
-        goal.pose = pose
-        return goal
-
-    def navigate_to_room(self, room_name: str) -> bool:
-        if room_name not in DELIVERY_ROOMS:
-            self.get_logger().error(f'Unknown room: "{room_name}"')
-            return False
-
-        x, y, yaw = DELIVERY_ROOMS[room_name]
-        self.get_logger().info(
-            f'Navigating to [{room_name}]  target=({x:.2f},{y:.2f},{yaw:.0f}°)')
-        self._publish_status(f'navigating:{room_name}')
-
-        if not self._nav_client.wait_for_server(timeout_sec=15.0):
-            self.get_logger().error(
-                'navigate_to_pose action server not available. '
-                'Is navigation_launch.py running and fully started?')
-            return False
-
-        goal = self._build_goal(x, y, yaw)
-        future = self._nav_client.send_goal_async(
-            goal, feedback_callback=self._feedback_cb)
-        rclpy.spin_until_future_complete(self, future)
-
-        handle: ClientGoalHandle = future.result()
-        if not handle.accepted:
-            self.get_logger().error(f'Goal to [{room_name}] rejected')
-            self._publish_status(f'rejected:{room_name}')
-            return False
-
-        result_future = handle.get_result_async()
-        deadline = time.time() + NAV_TIMEOUT_SEC
-        while not result_future.done():
-            rclpy.spin_once(self, timeout_sec=0.5)
-            if time.time() > deadline:
-                self.get_logger().warn(f'Timeout waiting for [{room_name}]')
-                handle.cancel_goal_async()
-                self._publish_status(f'timeout:{room_name}')
-                return False
-            if self._cancelled:
-                handle.cancel_goal_async()
-                return False
-
-        status = result_future.result().status
-        if status == GoalStatus.STATUS_SUCCEEDED:
-            self.get_logger().info(f'Arrived at [{room_name}]')
-            self._publish_status(f'arrived:{room_name}')
-            return True
-        elif status == GoalStatus.STATUS_CANCELED:
-            self._publish_status(f'cancelled:{room_name}')
-            return False
-        else:
-            self.get_logger().error(
-                f'Navigation to [{room_name}] FAILED (status={status})')
-            self._publish_status(f'failed:{room_name}')
-            return False
-
-    # ── Mission phases ────────────────────────────────────────────────────
-
-    def _pickup_sequence(self) -> None:
-        """Simulate picking up the package at the base station."""
-        self._state = State.PICKING_UP
-        self.get_logger().info('PICKUP: loading package at base station...')
-        self._publish_status('pickup:base')
-
-        # Respawn the Gazebo package model at the base so it appears for pickup
-        self._show_delivery_item_at_base()
-        time.sleep(0.3)
-
-        # Brief spin to "scan" the pickup area
-        self._spin(duration=2.5, angular_z=0.8)
-        time.sleep(0.5)
-
-        # Package is now on the robot — hide the Gazebo ground model
-        self._hide_delivery_item()
-
-        self._has_payload = True
-        self._state = State.LOADED
-        self.get_logger().info('PICKUP: package loaded ✓')
-        self._publish_status('loaded')
-
-    def _dropoff_sequence(self, room_name: str) -> None:
-        """Simulate delivering the package at a destination room."""
-        self._state = State.DELIVERING
-        x, y, _ = DELIVERY_ROOMS[room_name]
-        self.get_logger().info(
-            f'DELIVERY: placing package at [{room_name}] ({x:.2f},{y:.2f})')
-        self._publish_status(f'delivering:{room_name}')
-
-        # Delivery spin (one full rotation at 1 rad/s)
-        self._spin(duration=2.0 * math.pi, angular_z=1.0)
-
-        # Place delivery_item at destination in Gazebo world
-        self._place_delivery_item(x, y)
-
-        self._has_payload = False
-        self._state = State.IDLE
-        self.get_logger().info(f'DELIVERY: package delivered at [{room_name}] ✓')
-        self._publish_status(f'delivered:{room_name}')
-
-        # Pause at the delivery location so the drop-off is clearly visible
-        self.get_logger().info(
-            f'Pausing {DELIVERY_PAUSE_SEC:.0f} s at [{room_name}]...')
-        time.sleep(DELIVERY_PAUSE_SEC)
-        self.get_logger().info('Pause complete — proceeding.')
-
-    def _spin(self, duration: float, angular_z: float) -> None:
+    def _spin(self, duration, angular_z):
         msg = Twist()
         msg.angular.z = angular_z
         start = time.time()
         while time.time() - start < duration and not self._cancelled:
-            self._vel_pub.publish(msg)
+            self._pub.publish(msg)
             time.sleep(0.1)
-        self._vel_pub.publish(Twist())
+        self._pub.publish(STOP)
 
-    # ── Mission orchestration ─────────────────────────────────────────────
+    # ── Pickup sequence ───────────────────────────────────────────────────────
+
+    def _pickup(self):
+        self._state = State.PICKING_UP
+        self.get_logger().info('PICKUP: loading package at base...')
+        self._publish_status('pickup:base')
+        self._show_item_at_base()
+        time.sleep(0.3)
+        self._spin(2.5, 0.8)
+        time.sleep(0.3)
+        self._hide_item()
+        self._has_payload = True
+        self._state       = State.LOADED
+        self.get_logger().info('PICKUP: package loaded ✓')
+        self._publish_status('loaded')
+
+    # ── Dropoff sequence ──────────────────────────────────────────────────────
+
+    def _dropoff(self, room_name):
+        self._state = State.DELIVERING
+        x, y, _    = DELIVERY_ROOMS[room_name]
+        self.get_logger().info(
+            f'DELIVERY: placing package at [{room_name}] ({x:.2f},{y:.2f})')
+        self._publish_status(f'delivering:{room_name}')
+        self._spin(2.0 * math.pi, 1.0)
+        self._place_item(x, y)
+        self._has_payload = False
+        self._state       = State.IDLE
+        self.get_logger().info(f'DELIVERY: package delivered at [{room_name}] ✓')
+        self._publish_status(f'delivered:{room_name}')
+        self.get_logger().info(
+            f'Pausing {DELIVERY_PAUSE_SEC:.0f} s at [{room_name}]...')
+        time.sleep(DELIVERY_PAUSE_SEC)
+        self.get_logger().info('Pause complete.')
+
+    # ── Top-level mission ─────────────────────────────────────────────────────
 
     def run_delivery_route(
         self,
@@ -332,33 +585,16 @@ class DeliveryMission(Node):
         return_to_base: bool = True,
         loop: bool = False,
     ) -> bool:
-        """
-        Execute a delivery route.
-
-        For each stop:
-          1. Navigate to base station for pickup
-          2. Pick up package (spin + green marker)
-          3. Navigate to delivery room
-          4. Deliver package (spin + place Gazebo model)
-
-        After all stops: return to base (if return_to_base=True).
-        With --no-return, step 1 and the final return are skipped.
-        """
         if not stops:
             self.get_logger().warn('No stops specified.')
             return False
 
-        # ── Wait for Nav2 before doing anything ───────────────────────────────
-        self.get_logger().info(
-            'Waiting for navigate_to_pose server (up to 30 s)...\n'
-            'Make sure navigation_launch.py is running!')
-        if not self._nav_client.wait_for_server(timeout_sec=30.0):
-            self.get_logger().error(
-                'navigate_to_pose server not available after 30 s.\n'
-                'Start the navigation stack first:\n'
-                '  ros2 launch delivery_robot navigation_launch.py')
-            return False
-        self.get_logger().info('Nav2 ready — starting mission.')
+        # Wait for first LIDAR message before starting
+        self.get_logger().info('Waiting for LIDAR...')
+        while self._scan is None and not self._cancelled:
+            self._tick()
+            time.sleep(0.05)
+        time.sleep(1.0)
 
         iteration = 0
         while True:
@@ -369,59 +605,52 @@ class DeliveryMission(Node):
             self._publish_status(f'mission_start:{",".join(stops)}')
 
             all_ok = True
+            last_room = 'base'
 
             for i, room in enumerate(stops, 1):
                 if self._cancelled:
                     break
 
-                self.get_logger().info(
-                    f'─── Delivery {i}/{len(stops)}: [{room}] ───')
+                self.get_logger().info(f'─── Delivery {i}/{len(stops)}: [{room}] ───')
 
-                # ── Step 1: navigate to base for pickup ───────────────────
+                # ── Navigate to base for pickup ───────────────────────────────
                 if return_to_base:
                     self._state = State.NAVIGATING
-                    self.get_logger().info('Going to base station for pickup...')
-                    ok = self.navigate_to_room('base')
-                    if not ok:
-                        self.get_logger().error(
-                            'Could not reach base station — aborting mission')
-                        all_ok = False
-                        self._publish_status('mission_aborted')
+                    self.get_logger().info('Navigating to base for pickup...')
+                    self._publish_status('navigating:base')
+                    ok = self._follow_route(_ROUTE_FROM.get(last_room, []), 'return')
+                    if not ok and self._cancelled:
                         break
+                    last_room = 'base'
 
-                # ── Step 2: pick up ───────────────────────────────────────
-                self._pickup_sequence()
+                # ── Pickup ────────────────────────────────────────────────────
+                self._pickup()
 
-                # ── Step 3: navigate to delivery room ─────────────────────
+                # ── Navigate to delivery room ─────────────────────────────────
                 self._state = State.NAVIGATING
-                success = self.navigate_to_room(room)
+                self.get_logger().info(f'Navigating to [{room}]...')
+                self._publish_status(f'navigating:{room}')
 
-                if not success:
-                    all_ok = False
-                    self.get_logger().warn(
-                        f'Failed to reach [{room}] — dropping payload and returning to base')
-                    self._has_payload = False
-                    if return_to_base:
-                        self._state = State.RETURNING
-                        self.navigate_to_room('base')
-                    self._publish_status('mission_aborted')
+                route_to = _ROUTE_TO.get(room, [(DELIVERY_ROOMS[room][0],
+                                                  DELIVERY_ROOMS[room][1], 0.40)])
+                ok = self._follow_route(route_to, f'to-{room}')
+                if not ok and self._cancelled:
                     break
 
-                # ── Step 4: deliver ───────────────────────────────────────
-                self._dropoff_sequence(room)
+                # ── Dropoff ───────────────────────────────────────────────────
+                self._dropoff(room)
+                last_room = room
 
-            # ── Final return to base after all stops ──────────────────────
-            if all_ok and return_to_base and not self._cancelled:
+            # ── Final return to base ──────────────────────────────────────────
+            if return_to_base and not self._cancelled:
                 self._state = State.RETURNING
                 self.get_logger().info('All stops done — returning to base...')
                 self._publish_status('returning:base')
-                ok = self.navigate_to_room('base')
+                self._follow_route(_ROUTE_FROM.get(last_room, []), 'final-return')
+                self._pub.publish(STOP)
                 self._state = State.IDLE
-                if ok:
-                    self.get_logger().info('Back at base station ✓')
-                    self._publish_status('arrived:base')
-                else:
-                    self.get_logger().warn('Could not complete final return to base')
+                self.get_logger().info('Back at base station ✓')
+                self._publish_status('arrived:base')
 
             if all_ok:
                 self.get_logger().info(
@@ -435,22 +664,23 @@ class DeliveryMission(Node):
             self.get_logger().info('Loop mode — restarting in 5 s...')
             time.sleep(5.0)
 
-    # ── Utilities ─────────────────────────────────────────────────────────
+    # ── Utilities ─────────────────────────────────────────────────────────────
 
-    def _publish_status(self, status: str) -> None:
+    def _publish_status(self, status: str):
         msg = String()
         msg.data = status
-        self._status_pub.publish(msg)
+        self._status.publish(msg)
 
-    def list_rooms(self) -> None:
+    def list_rooms(self):
         for name, (x, y, yaw) in DELIVERY_ROOMS.items():
             self.get_logger().info(
                 f'  {name:20s}  x={x:6.2f}  y={y:6.2f}  yaw={yaw:6.1f}°')
 
-    def shutdown(self) -> None:
-        self._cancelled = True
+    def shutdown(self):
+        self._cancelled   = True
         self._has_payload = False
-        self._state = State.IDLE
+        self._state       = State.IDLE
+        self._pub.publish(STOP)
 
 
 # =============================================================================
@@ -459,53 +689,28 @@ class DeliveryMission(Node):
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(
-        description='Autonomous Delivery Mission Node',
+        description='Autonomous Delivery Mission (LIDAR navigation)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   ros2 run delivery_robot delivery_mission room1 room3 room2
-  ros2 run delivery_robot delivery_mission --algorithm mppi room1 room2
-  ros2 run delivery_robot delivery_mission --list
   ros2 run delivery_robot delivery_mission --loop room1 room2
   ros2 run delivery_robot delivery_mission --no-return room1
+  ros2 run delivery_robot delivery_mission --list
 """,
     )
-    parser.add_argument(
-        'rooms', nargs='*', default=['room1', 'room2'],
-        help='Ordered delivery rooms (default: room1 room2)',
-    )
-    parser.add_argument('--list',       action='store_true')
-    parser.add_argument('--loop',       action='store_true')
-    parser.add_argument('--no-return',  dest='no_return', action='store_true')
-    parser.add_argument(
-        '--algorithm', default='dwa', choices=['dwa', 'mppi'],
-        help='Algorithm label for metrics (default: dwa)')
-
+    parser.add_argument('rooms', nargs='*', default=['room1', 'room2'])
+    parser.add_argument('--list',     action='store_true')
+    parser.add_argument('--loop',     action='store_true')
+    parser.add_argument('--no-return', dest='no_return', action='store_true')
     filtered = [a for a in (argv or []) if not a.startswith('--ros-args')]
     return parser.parse_args(filtered)
 
 
 def main(args=None):
     rclpy.init(args=args)
-
-    cli_args = sys.argv[1:]
-    opts = parse_args(cli_args)
-
+    opts = parse_args(sys.argv[1:])
     node = DeliveryMission()
-
-    # Pass algorithm label so metrics_logger can correlate
-    try:
-        node.set_parameters([
-            rclpy.parameter.Parameter(
-                'algorithm',
-                rclpy.parameter.Parameter.Type.STRING,
-                opts.algorithm,
-            )
-        ])
-    except Exception:
-        pass
-    node._algo = opts.algorithm
-
     try:
         if opts.list:
             node.list_rooms()
@@ -516,9 +721,10 @@ def main(args=None):
                 loop=opts.loop,
             )
     except KeyboardInterrupt:
-        node.get_logger().info('Mission interrupted by user (Ctrl-C)')
+        node.get_logger().info('Mission interrupted (Ctrl-C)')
         node.shutdown()
     finally:
+        node._pub.publish(STOP)
         node.destroy_node()
         try:
             rclpy.shutdown()
