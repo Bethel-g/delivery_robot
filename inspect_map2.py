@@ -1,4 +1,5 @@
 import yaml
+# pyrefly: ignore [missing-import]
 import cv2
 
 with open('/home/betheln/ros2_ws/src/Robotics/delivery_robot2/delivery_robot/maps/office_map.yaml', 'r') as f:
