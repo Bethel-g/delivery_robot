@@ -1,4 +1,5 @@
 import yaml
+# pyrefly: ignore [missing-import]
 import cv2
 import numpy as np
 
