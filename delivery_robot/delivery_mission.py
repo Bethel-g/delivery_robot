@@ -150,7 +150,8 @@ _ROUTE_TO: dict[str, list] = {
     ],
     "room3": [
         (1.5, 2.0, 0.40),
-        (2.0, 3.5, 0.40),   # approach left gap from west — CLEAR
+        (2.5, 2.0, 0.40),   # clear desk_room1 to the east
+        (2.5, 3.5, 0.40),   # approach left gap from south-east
         (2.5, 4.5, 0.40),   # past N-S partition, inside room3 — CLEAR
         (2.5, 5.3, 0.40),   # room3 delivery zone
     ],
@@ -184,8 +185,9 @@ _ROUTE_FROM: dict[str, list] = {
         (0.5, 2.0,  0.40),
     ],
     "room3": [
-        (2.5, 4.2, 0.40),   # just north of partition
-        (2.0, 3.5, 0.40),   # south of partition, west side — CLEAR
+        (2.5, 4.5, 0.40),   # just north of partition
+        (2.5, 3.5, 0.40),   # south of partition
+        (2.5, 2.0, 0.40),   # clear desk_room1 to the east
         (0.5, 2.0, 0.40),
     ],
     "room4": [
@@ -379,6 +381,28 @@ class DeliveryMission(Node):
 
             err = _wrap(math.atan2(dy, dx) - self._yaw)
             fd  = self._front()
+
+            # Dynamic obstacle wait logic
+            in_dynamic_zone = (2.0 <= self._x <= 8.0) and (2.0 <= self._y <= 6.0)
+            if in_dynamic_zone and fd < FRONT_WARN:
+                self.get_logger().info('⚠️ Front obstacle detected in dynamic zone. Waiting for it to clear...')
+                self._pub.publish(STOP)
+                self._rst_stuck()
+                cleared = False
+                for _ in range(30):
+                    self._tick()
+                    if self._cancelled:
+                        break
+                    if self._front() >= FRONT_WARN:
+                        cleared = True
+                        break
+                    time.sleep(0.1)
+                    self._rst_stuck()
+                if cleared:
+                    self.get_logger().info('✅ Obstacle cleared. Resuming navigation.')
+                    continue
+                else:
+                    self.get_logger().info('Timeout waiting for obstacle. Resuming normal avoidance.')
 
             dr = self._smin(125, 165)
             dl = self._smin(195, 235)

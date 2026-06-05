@@ -8,17 +8,73 @@
 
 ## 1. Executive Summary
 
-This report presents a fully autonomous indoor delivery robot system designed to operate within a simulated multi-room office environment. Using **Robot Operating System 2 (ROS 2) Humble**, the system integrates a custom differential-drive robot model, real-time Simultaneous Localization and Mapping (SLAM), adaptive localization, path planning, obstacle avoidance, and high-level mission orchestration.
+This report outlines the design, architecture, and technical implementation of an autonomous indoor delivery robot. The system operates in a simulated multi-room office environment built in **Gazebo Classic 11** and is driven by **ROS 2 Humble**. The project demonstrates a complete autonomous navigation pipeline: from zero-knowledge environment exploration (SLAM) to dynamic routing, local obstacle avoidance, and mission orchestration.
 
-The workflow operates in two distinct phases:
-1. **Mapping Phase (SLAM):** An automated exploration node (`slam_explorer`) commands the robot to traverse the environment, constructing a metric occupancy grid map via `slam_toolbox`.
-2. **Navigation Phase:** The map is frozen, and a high-level mission orchestrator (`delivery_mission`) sequences multi-stop delivery routes. The robot localizes using Adaptive Monte Carlo Localization (AMCL) and plans trajectories using an A* global planner and a Dynamic Window Approach (DWB) local controller, monitored by a safety-critical collision polygon observer.
+The system is designed to handle realistic challenges such as dynamic obstacles (office workers), tight corridors, and sensor noise, leveraging industry-standard algorithms configured for dual-mode comparison (DWA vs. MPPI).
 
 ---
 
-## 2. System Architecture
+## 2. Project and Folder Structure
 
-The robot's software architecture follows a modular, node-based layout. High-level commands flow from the mission CLI to the navigation stack, which translates them into physical velocities for the Gazebo simulator.
+A modular package structure ensures separation of concerns between physics modeling, navigation configurations, and high-level mission logic.
+
+```text
+delivery_robot/
+├── delivery_robot/              # Core Python Nodes
+│   ├── delivery_mission.py      # Mission orchestrator (Action Client & State Machine)
+│   ├── dynamic_obstacles.py     # Real-time Gazebo entity controller for moving obstacles
+│   ├── metrics_logger.py        # Performance logging (duration, path length, recovery events)
+│   ├── record_waypoints.py      # Interactive tool to map physical coordinates to room names
+│   └── health_check.py          # Pre-flight system validator
+│
+├── config/                      # Parameter Definitions
+│   ├── nav2_params_dwa.yaml     # Algorithm Set 1: A* Global + DWB Local
+│   ├── nav2_params_mppi.yaml    # Algorithm Set 2: Smac Hybrid A* Global + MPPI Local
+│   └── slam_params.yaml         # slam_toolbox configuration for mapping
+│
+├── launch/                      # System Orchestration
+│   ├── slam_launch.py           # Phase 1: Bootstraps Gazebo, URDF, and SLAM
+│   └── navigation_launch.py     # Phase 2: Bootstraps Nav2 stack, AMCL, and Dynamic Obstacles
+│
+├── urdf/                        # Robot Physics & Kinematics
+│   └── robot.urdf.xacro         # Xacro macros defining chassis, diff-drive, LIDAR, and IMU
+│
+├── worlds/                      # Gazebo Environments
+│   └── office.world             # 4-room office with furniture and dynamic entity definitions
+│
+├── maps/                        # Persistence
+│   └── office_map.yaml          # Saved occupancy grid metadata (points to .pgm image)
+│
+└── rviz/                        # Visualization
+    ├── slam.rviz                # Visualization profile for mapping phase
+    └── navigation.rviz          # Visualization profile for autonomous delivery phase
+```
+
+---
+
+## 3. Full System Workflow
+
+The project is structured into two distinct operational phases:
+
+### Phase 1: Mapping & Exploration (SLAM)
+1. **Bootstrapping:** The environment is loaded into Gazebo alongside the physical robot model.
+2. **Exploration:** The `slam_explorer` (or manual teleop) drives the robot through unknown spaces.
+3. **Map Construction:** `slam_toolbox` actively fuses LIDAR (`/scan`) and wheel odometry (`/odom`)This structural approach will immediately address the data quality issues and algorithmic bottlenecks holding back your current metrics. to construct a 2D occupancy grid in real time.
+4. **Serialization:** The completed map is frozen and saved to disk using the `map_saver_cli` as an image (`.pgm`) and metadata file (`.yaml`).
+
+### Phase 2: Autonomous Delivery & Navigation
+1. **Localization:** The `map_server` loads the static map, while AMCL uses a particle filter to track the robot's pose relative to the map origin.
+2. **Pre-flight Checks:** The `health_check.py` node verifies that all critical sensor streams and the Nav2 action server are active.
+3. **Mission Dispatch:** The user initiates a delivery via the CLI (`ros2 run delivery_robot delivery_mission room1 room2`).
+4. **Execution:** 
+   - The mission node coordinates stops, loading times, and payload status (visualized as a green box in RViz).
+   - The Nav2 Behavior Tree orchestrates global path planning, local velocity commands, and recovery behaviors if stuck.
+   - Dynamic obstacles actively cross the robot's path, forcing the local planner to execute evasive maneuvers.
+5. **Metrics Logging:** `metrics_logger.py` records the time taken, distance traveled, and recovery actions to a CSV for performance evaluation.
+
+---
+
+## 4. System Architecture & Component Interactions
 
 ```mermaid
 graph TD
@@ -26,12 +82,12 @@ graph TD
     classDef nav fill:#bbf,stroke:#333,stroke-width:2px;
     classDef sim fill:#bfb,stroke:#333,stroke-width:2px;
 
-    User[User CLI / Script] -->|Stops: room1, room2| DM(delivery_mission Node):::client
-    DM -->|NavigateToPose Action| BT(BT Navigator):::nav
+    User[User CLI] -->|Destinations| DM(delivery_mission Node):::client
+    DM -->|NavigateToPose Action| BT(Nav2 Behavior Tree):::nav
     
     subgraph Nav2 Stack
-        BT -->|Global Path Request| GP(Global Planner: A* / NavFn):::nav
-        BT -->|Local Control Loop| LP(Local Controller: DWB):::nav
+        BT -->|Global Path Request| GP(Global Planner):::nav
+        BT -->|Local Control Loop| LP(Local Controller):::nav
         GP -->|Planned Path| LP
         AMCL(AMCL Localizer):::nav -->|Map-to-Odom TF| LP
         CM(Collision Monitor):::nav -->|Safety Polygon Stop| LP
@@ -40,7 +96,7 @@ graph TD
     LP -->|/cmd_vel_smoothed| CM
     CM -->|/cmd_vel| Gazebo(Gazebo Physics Server):::sim
     
-    subgraph Simulated Robot
+    subgraph Simulated Environment
         Gazebo -->|/scan| AMCL
         Gazebo -->|/scan| CM
         Gazebo -->|/odom| AMCL
@@ -51,150 +107,63 @@ graph TD
 
 ---
 
-## 3. Robot URDF Model Design & Kinematics
+## 5. Detailed Algorithm Breakdown
 
-The physical chassis is defined as a differential-drive robot using Unified Robot Description Format (URDF) extended with Xacro macros.
+The project serves as a testbed for comparing industry-standard navigation algorithms. The system allows switching between two distinct algorithm pipelines via the `algorithm:=dwa` or `algorithm:=mppi` launch arguments.
 
-### 3.1 Kinematics & Inertial Properties
-*   **Chassis Geometry:** Cylindrical shape (Radius: 0.25 m, Height: 0.15 m, Mass: 5.0 kg) ensuring isotropic rotation inside tight spaces.
-*   **Actuation:** Two actuated side wheels (Radius: 0.08 m, Width: 0.04 m, Mass: 0.5 kg) driven by the Gazebo diff-drive controller plugin.
-*   **Stability Calibration:** To resolve caster-induced tipping, the passive caster wheel (Radius: 0.03 m) joint geometry was mathematically matched to the drive wheel radius:
-    $$\text{Caster } Z_{\text{origin}} = - \left( \frac{\text{Base Height}}{2} \right) - \text{Wheel Radius} + \text{Caster Radius}$$
-    This offsets the base link exactly $0.08\text{ m}$ off the ground, ensuring perfectly horizontal weight distribution.
+### 5.1 Mapping: SLAM Toolbox
+- **Core Algorithm:** Karto-based graph SLAM utilizing **Ceres Solver** for scan-to-scan matching.
+- **Loop Closure:** Continuously scans historical trajectories for spatial overlaps. When a loop is closed, a global pose-graph optimization executes to retroactively correct cumulative odometric drift.
+- **Output:** A globally consistent metric Occupancy Grid (`free`, `occupied`, `unknown`).
 
-### 3.2 Sensor Configurations
-*   **LIDAR (Laser Range Finder):** Emulates a 360-degree planar scanner operating at 10 Hz with 360 samples, a range of 0.12 m to 10.0 m, and Gaussian noise ($\sigma = 0.01\text{ m}$).
-*   **IMU (Inertial Measurement Unit):** Measures angular velocity and linear acceleration along three axes to aid localization.
+### 5.2 Localization: AMCL (Adaptive Monte Carlo Localization)
+- **Core Algorithm:** KLD-Sampling Monte Carlo Localization.
+- **Mechanism:** Maintains a probability distribution of the robot's pose using a set of particles. 
+  - **Prediction:** Particles are moved according to wheel odometry `/odom` updates.
+  - **Update:** Particles are weighted based on how well the live LIDAR `/scan` matches the static `/map`.
+  - **Resampling:** Unlikely particles are discarded, and new ones are generated around high-probability regions.
 
----
+### 5.3 Global Planning Strategies
+The global planner is responsible for finding the shortest collision-free route across the static map.
+1. **NavFn (A* Algorithm):** Used in the DWA pipeline. Operates on the grid map, heavily penalizing cells near obstacles using the global costmap inflation radius to ensure safe standoff distances.
+2. **Smac Hybrid A*:** Used in the MPPI pipeline. Instead of simple grid cell traversal, it considers the kinematic constraints (turning radius) of the robot, generating a smoother, physically realizable path.
 
-## 4. Coordinate Frames & Transformations (TF2)
+### 5.4 Local Control & Obstacle Avoidance
+The local controller operates at 30Hz, reacting to dynamic obstacles (like the moving office workers) and ensuring the robot follows the global path safely.
 
-The system relies on the standard ROS spatial transform chain to navigate within the Cartesian coordinates of the occupancy map.
+#### Option A: DWB (Dynamic Window Approach)
+- **Mechanism:** Samples dozens of valid velocity pairs $(v, \omega)$ within a "dynamic window" defined by the robot's current speed and acceleration limits.
+- **Scoring:** Each sampled trajectory is rolled forward in time and scored using a set of critics:
+  - `PathAlign` / `GoalAlign`: Rewards trajectories that follow the global path and face the goal.
+  - `BaseObstacle`: Heavily penalizes trajectories that bring the robot's footprint close to obstacles in the local costmap.
+- **Selection:** The highest-scoring feasible trajectory is converted into a `/cmd_vel` command.
 
-```
-map (World Origin)
- └─ odom (Odometric Accumulation - drifts over time)
-     └─ base_footprint (Projection of robot center on ground plane)
-         └─ base_link (Robot physical chassis origin)
-             ├─ left_wheel_link
-             ├─ right_wheel_link
-             ├─ caster_link
-             ├─ laser_link (LIDAR scanner focal point)
-             └─ imu_link (IMU sensor center)
-```
+#### Option B: MPPI (Model Predictive Path Integral)
+- **Mechanism:** A modern, optimization-based controller. It generates thousands of random, noisy control sequences (rollouts) using the GPU/CPU.
+- **Evaluation:** Evaluates the cost of each rollout against the local costmap and global path.
+- **Selection:** Instead of picking one best path, it computes a weighted average of all successful trajectories, producing extremely smooth, continuous velocity commands that naturally glide around dynamic obstacles.
 
-*   **`map` $\rightarrow$ `odom`:** Published by AMCL. Corrects for cumulative wheel slip and odometry drift by comparing LIDAR observations to the static map.
-*   **`odom` $\rightarrow$ `base_footprint`:** Published by the Gazebo differential drive plugin based on wheel encoder integration.
-*   **`base_footprint` $\rightarrow$ `base_link` $\rightarrow$ sensor links:** Static transforms defined in the URDF file.
-
----
-
-## 5. SLAM & Automated Exploration
-
-The Simultaneous Localization and Mapping phase uses `slam_toolbox` in `online_async` mode to map the unknown world.
-
-### 5.1 slam_toolbox Parameter Architecture
-*   **Scan Matcher:** Utilizes Ceres Solver for scan-to-scan matching, optimizing local position updates.
-*   **Loop Closure:** Scans the historical trajectory for spatial overlaps. When a loop is detected, a global pose-graph optimization executes to resolve cumulative drift.
-
-### 5.2 Automated Mapping Node (`slam_explorer`)
-To bypass slow, error-prone keyboard teleoperation, a custom ROS 2 python node, `slam_explorer`, was developed. It uses timed open-loop cmd_vel trajectories with localized sweeps:
-*   **Sweeping Action:** Rotates the LIDAR $\pm 30^\circ$ at key points to build a full field of view inside rooms.
-*   **Path Routing:**
-    ```
-    Base (Sweep) ──> Room 1 (Sweep) ──> Room 2 (Sweep) 
-                      │
-                      └──> North to Room 4 (Sweep) ──> West to Room 3 (Sweep) ──> Base (Return)
-    ```
+### 5.5 Safety Fallbacks & Recovery
+- **Collision Monitor:** A deterministic safety layer. Defines a tight bounding polygon around the robot. If raw LIDAR points enter this polygon, it hard-stops the robot, overriding the local controller.
+- **Behavior Tree Recoveries:** If the robot gets trapped, the behavior tree triggers cascading recoveries: `Clear Costmaps` $\rightarrow$ `Spin (to map surroundings)` $\rightarrow$ `Back Up` $\rightarrow$ `Re-plan`.
 
 ---
 
-## 6. Nav2 Navigation Pipeline
+## 6. Robot Hardware & Kinematics (URDF)
 
-Once the map is generated and saved (`office_map.pgm` and `office_map.yaml`), the Nav2 stack controls the autonomous movement.
-
-| Nav2 Module | Algorithm / Configuration | Purpose |
-|---|---|---|
-| **Map Server** | Trinary Occupancy Grid Loader | Feeds the map image to Nav2 servers. |
-| **AMCL** | KLD-Sampling Monte Carlo localization | Tracks robot position inside the map using particles. |
-| **Global Planner** | A* (NavFn) | Finds the shortest collision-free grid path. |
-| **Local Controller** | DWB (Dynamic Window Approach) | Computes real-time velocities ($v, \omega$) to track the global path. |
-| **Collision Monitor** | Polygon Safety Monitor | Cuts power if an obstacle breaks the footprint envelope. |
-| **Lifecycle Manager** | Sequenced Startup Orchestrator | Controls transitioning nodes through active/inactive states. |
-
-### 6.1 Collision Avoidance & Recovery Behavior
-The local controller evaluates trajectories over a short forward horizon. To prevent collisions with the patrolling dynamic obstacle:
-1. **DWB Critics:** Path alignment, goal alignment, and obstacle distance scoring are weighted to prioritize clearing obstacles.
-2. **Collision Monitor (PolygonStop):** A safety-critical polygon box ($0.6\text{ m} \times 0.44\text{ m}$) centered on the robot base monitors the `/scan` topic. If $\ge 4$ laser points fall within the polygon, the collision monitor intercepts the `/cmd_vel` output and publishes zero velocity to prevent collision.
-3. **Recovery Behaviors:** If stuck, the Nav2 behavior tree initiates recovery procedures: clear costmaps $\rightarrow$ spin in place $\rightarrow$ back up $\rightarrow$ retry path planning.
+The simulated robot is defined using Xacro/URDF and uses realistic physics parameters:
+- **Chassis:** Cylindrical (Radius: 0.18 m, Height: 0.12 m). Mass: 5.0 kg with accurately computed inertia tensors to ensure realistic acceleration and braking dynamics.
+- **Drive System:** Differential drive with two actuated wheels and a passive rear caster.
+- **Sensors:**
+  - **2D LIDAR:** 360° FOV, 10Hz, 360 rays, 10m range with applied Gaussian noise ($\sigma=0.01$).
+  - **IMU:** 100Hz orientation and acceleration data.
+- **High-Speed Tuning:** The `<max_wheel_acceleration>` and `<max_wheel_torque>` limits in the Gazebo diff-drive plugin are heavily tuned to allow snappy, responsive acceleration up to 1.5 m/s, matching the expectations of the Nav2 dynamic window.
 
 ---
 
-## 7. Custom Python Utilities & Mission Node
+## 7. Custom Software Stack Highlights
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        DELIVERY SYSTEM SUITE                           │
-├────────────────────────────────────────────────────────────────────────┤
-│ 1. health_check.py      --> Pre-flight topic & action server validator  │
-│ 2. record_waypoints.py  --> Interactive mapping tool for Room Posets   │
-│ 3. delivery_mission.py  --> Main mission action client orchestrator     │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-### 7.1 Pre-Flight Health Validator (`health_check`)
-Verifies system sanity before launching missions:
-*   Checks existence and active message publication on `/scan`, `/odom`, `/map`, and `/amcl_pose`.
-*   Pings the `navigate_to_pose` Action Server to ensure the Nav2 stack is fully transition-activated.
-
-### 7.2 Waypoint Recorder (`record_waypoints`)
-Operators drive the robot to each room post-mapping. The script reads `/amcl_pose` (or `/odom`), extracts the current Cartesian position and orientation, and formats the output into a dictionary ready to paste directly into the mission file.
-
-### 7.3 Delivery Orchestrator (`delivery_mission`)
-An Action Client that sends `NavigateToPose` goals to the Nav2 Action Server. Key features:
-*   **Multi-Stop Routing:** Sequences multiple destinations (e.g. `room1 room3 room2`).
-*   **Fault Recovery:** If navigation to any stop fails or times out (120 s limit), the node initiates an **emergency return to base** to secure the payload.
-*   **Loop Option:** Run with `--loop` to repeat delivery routes continuously.
-
----
-
-## 8. Deployment & Execution Guide
-
-### 8.1 Build the Workspace
-```bash
-cd ~/ros2_ws
-colcon build --symlink-install
-source install/setup.bash
-```
-
-### 8.2 Run Autonomous SLAM Mapping
-```bash
-# Terminal 1: Launch Gazebo world, robot URDF, SLAM toolbox and RViz
-ros2 launch delivery_robot slam_launch.py
-
-# Terminal 2: Run the automated mapping explorer
-ros2 run delivery_robot slam_explorer
-
-# Terminal 3: Once mapping is complete, freeze the map
-ros2 run nav2_map_server map_saver_cli -f ~/ros2_ws/src/Robotics/delivery_robot2/delivery_robot/maps/office_map
-```
-
-### 8.3 Run Autonomous Delivery Mission
-```bash
-# Terminal 1: Launch Navigation Mode (loads the frozen map)
-ros2 launch navigation_launch.py
-
-# Terminal 2: Run health check to confirm stack readiness
-ros2 run delivery_robot health_check
-
-# Terminal 3: Dispatch robot to Room 1, Room 3, and Room 2
-ros2 run delivery_robot delivery_mission room1 room3 room2
-```
-
----
-
-## 9. Key Performance Tuning Decisions
-*   **Modular Launch Refinement:** Replaced the monolithic `nav2_bringup` launch with individual node instantiations in `navigation_launch.py`. This resolves timing races during initialization by delaying Nav2 activation until Gazebo physics are fully initialized.
-*   **Caster Height Alignment:** Solved physical wheel-wobble and tipping in Gazebo by lowering the caster attachment origin by $0.05\text{ m}$, aligning it perfectly with the drive wheel contact plane.
-*   **Local Costmap Inflation:** Adjusted inflation radius parameters to allow the robot to fit through the narrow doors of the office layout without triggering costmap collisions.
+- **`dynamic_obstacles.py`:** Circumvents Gazebo plugin limitations by directly publishing to `/gazebo/set_entity_state`. It generates mathematical ping-pong oscillations to move obstacle models, effectively testing the robot's dynamic avoidance capabilities.
+- **`delivery_mission.py`:** A robust ROS 2 Action Client. It manages a sequence of Nav2 `NavigateToPose` goals. Crucially, it features timeout detection and an **emergency return-to-base** protocol if navigation completely fails, ensuring the "payload" is never stranded.
+- **Costmap Tuning:** Both global and local costmaps are configured with specific inflation radii to ensure the robot can successfully pass through the narrow door frames in the `office.world` environment while avoiding walls.
+This structural approach will immediately address the data quality issues and algorithmic bottlenecks holding back your current metrics.

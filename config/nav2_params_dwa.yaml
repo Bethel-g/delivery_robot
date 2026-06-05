@@ -128,16 +128,16 @@ controller_server:
       debug_trajectory_details: false
       min_vel_x: 0.0
       min_vel_y: 0.0
-      max_vel_x: 0.65
+      max_vel_x: 1.50
       max_vel_y: 0.0
-      max_vel_theta: 1.8
+      max_vel_theta: 2.0
       min_speed_xy: 0.0
-      max_speed_xy: 0.65
+      max_speed_xy: 1.50
       min_speed_theta: 0.0
-      acc_lim_x: 2.0
+      acc_lim_x: 3.5
       acc_lim_y: 0.0
-      acc_lim_theta: 2.0
-      decel_lim_x: -2.5
+      acc_lim_theta: 2.5
+      decel_lim_x: -3.5
       decel_lim_y: 0.0
       decel_lim_theta: -3.2
       vx_samples: 20
@@ -307,10 +307,10 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.26, 0.0, 1.0]
-    min_velocity: [-0.26, 0.0, -1.0]
-    max_accel: [2.5, 0.0, 3.2]
-    max_decel: [-2.5, 0.0, -3.2]
+    max_velocity: [1.50, 0.0, 2.0]
+    min_velocity: [-1.50, 0.0, -2.0]
+    max_accel: [3.5, 0.0, 3.2]
+    max_decel: [-3.5, 0.0, -3.2]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

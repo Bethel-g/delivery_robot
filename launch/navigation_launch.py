@@ -22,17 +22,23 @@ Stack order:
 """
 import os
 
+# pyrefly: ignore [missing-import]
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
+# pyrefly: ignore [missing-import]
 from launch.actions import (
     DeclareLaunchArgument, ExecuteProcess, TimerAction, LogInfo,
 )
+# pyrefly: ignore [missing-import]
 from launch.conditions import IfCondition
+# pyrefly: ignore [missing-import]
 from launch.substitutions import (
     Command, LaunchConfiguration, PythonExpression,
 )
+# pyrefly: ignore [missing-import]
 from launch_ros.actions import Node
+# pyrefly: ignore [missing-import]
 from launch_ros.parameter_descriptions import ParameterValue
 
 
@@ -241,8 +247,8 @@ def generate_launch_description():
             name='dynamic_obstacle_controller',
             output='screen',
             parameters=[{
-                'obs1_speed': 0.4,
-                'obs2_speed': 0.8,
+                'obs1_speed': 0.1,
+                'obs2_speed': 0.1,
                 'update_rate': 10.0,
             }],
         )],
